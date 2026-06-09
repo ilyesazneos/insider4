@@ -1,0 +1,33 @@
+# Private/local configs
+.config/
+config
+*.local
+*.secret
+
+# Environment / secrets
+.env
+.env.*
+*.pem
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+
+# Backups / generated files
+*.bak
+*.backup
+*.old
+*.orig
+*.tmp
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.7z
+*.rar
+insider4.bak-*
+
+# OS/editor noise
+.DS_Store
+.vscode/
+.idea/

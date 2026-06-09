@@ -1,0 +1,1246 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+APP="insider4"
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/insider4"
+CONFIG_FILE="$CONFIG_DIR/config"
+PAPIER2_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/papier2"
+PAPIER2_CONFIG_FILE="$PAPIER2_CONFIG_DIR/config"
+
+DEFAULT_PORT="19999"
+DEFAULT_BACKUP_PORT="20000"
+DEFAULT_PROJECT_DIR="~"
+DEFAULT_FRONT_SERVICE="frontend"
+DEFAULT_BACK_SERVICE="backend"
+DEFAULT_LOCAL_BACKUP_DIR="insider4-backups"
+
+mkdir -p "$CONFIG_DIR" "$PAPIER2_CONFIG_DIR"
+
+fail() {
+  echo "[$APP] Error: $*" >&2
+  exit 1
+}
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || fail "Missing command: $1"
+}
+
+expand_local_dir() {
+  local value="${1:-}"
+
+  # Values from config may be shell-escaped, for example \~/folder.
+  value="${value#\\}"
+
+  case "$value" in
+    "~")
+      printf "%s\n" "$HOME"
+      ;;
+    "~/"*)
+      printf "%s\n" "$HOME/${value#~/}"
+      ;;
+    /*)
+      printf "%s\n" "$value"
+      ;;
+    *)
+      printf "%s\n" "$HOME/$value"
+      ;;
+  esac
+}
+
+clipboard_command() {
+  if command -v xclip >/dev/null 2>&1; then
+    echo "xclip -selection clipboard"
+  elif command -v wl-copy >/dev/null 2>&1; then
+    echo "wl-copy"
+  elif command -v pbcopy >/dev/null 2>&1; then
+    echo "pbcopy"
+  elif command -v clip.exe >/dev/null 2>&1; then
+    echo "clip.exe"
+  else
+    fail "No clipboard tool found. Install xclip, wl-clipboard, pbcopy, or clip.exe."
+  fi
+}
+
+sanitize_ssh_target() {
+  local value="${1:-}"
+  value="${value#ssh }"
+  value="${value#ssh -t }"
+  printf "%s\n" "$value"
+}
+
+write_config() {
+  local ssh_target="$1"
+  local port="$2"
+  local backup_port="$3"
+  local project_dir="$4"
+  local front_service="$5"
+  local back_service="$6"
+  local local_backup_dir="$7"
+
+  cat > "$CONFIG_FILE" <<CFG
+SSH_TARGET=$(printf "%q" "$ssh_target")
+PORT=$(printf "%q" "$port")
+BACKUP_PORT=$(printf "%q" "$backup_port")
+PROJECT_DIR=$(printf "%q" "$project_dir")
+FRONT_SERVICE=$(printf "%q" "$front_service")
+BACK_SERVICE=$(printf "%q" "$back_service")
+LOCAL_BACKUP_DIR=$(printf "%q" "$local_backup_dir")
+CFG
+
+  chmod 600 "$CONFIG_FILE"
+
+  cat > "$PAPIER2_CONFIG_FILE" <<CFG
+SSH_TARGET=$(printf "%q" "$ssh_target")
+PORT=$(printf "%q" "$port")
+REMOTE_DIR=$(printf "%q" "$project_dir")
+CFG
+
+  chmod 600 "$PAPIER2_CONFIG_FILE"
+
+  echo "[$APP] Config saved: $CONFIG_FILE"
+  echo "[$APP] papier2-compatible config synced: $PAPIER2_CONFIG_FILE"
+}
+
+config_looks_valid() {
+  [ -n "${SSH_TARGET:-}" ] || return 1
+  [ -n "${PROJECT_DIR:-}" ] || return 1
+  [ -n "${FRONT_SERVICE:-}" ] || return 1
+  [ -n "${BACK_SERVICE:-}" ] || return 1
+  [ -n "${LOCAL_BACKUP_DIR:-}" ] || return 1
+
+  case "${PORT:-}" in
+    ""|*[!0-9]*) return 1 ;;
+  esac
+
+  case "${BACKUP_PORT:-}" in
+    ""|*[!0-9]*) return 1 ;;
+  esac
+
+  local lower_target
+  lower_target="${SSH_TARGET,,}"
+
+  case "$lower_target" in
+    *" "*|*port=*|*backup_port=*|*project_dir=*|*remote_dir=*|*front_service=*|*back_service=*|*local_backup_dir=*|*"\\n"*)
+      return 1
+      ;;
+  esac
+
+  return 0
+}
+
+load_config() {
+  if [ ! -f "$CONFIG_FILE" ]; then
+    echo "[$APP] No config found. Starting configuration."
+    configure
+  fi
+
+  SSH_TARGET=""
+  PORT="$DEFAULT_PORT"
+  BACKUP_PORT="$DEFAULT_BACKUP_PORT"
+  PROJECT_DIR="$DEFAULT_PROJECT_DIR"
+  FRONT_SERVICE="$DEFAULT_FRONT_SERVICE"
+  BACK_SERVICE="$DEFAULT_BACK_SERVICE"
+  LOCAL_BACKUP_DIR="$DEFAULT_LOCAL_BACKUP_DIR"
+
+  set +e
+  # shellcheck disable=SC1090
+  source "$CONFIG_FILE"
+  local source_status=$?
+  set -e
+
+  if [ "$source_status" -ne 0 ] || ! config_looks_valid; then
+    echo "[$APP] Config missing or invalid. Starting configuration."
+    configure
+
+    SSH_TARGET=""
+    PORT="$DEFAULT_PORT"
+    BACKUP_PORT="$DEFAULT_BACKUP_PORT"
+    PROJECT_DIR="$DEFAULT_PROJECT_DIR"
+    FRONT_SERVICE="$DEFAULT_FRONT_SERVICE"
+    BACK_SERVICE="$DEFAULT_BACK_SERVICE"
+    LOCAL_BACKUP_DIR="$DEFAULT_LOCAL_BACKUP_DIR"
+
+    set +e
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE"
+    source_status=$?
+    set -e
+
+    [ "$source_status" -eq 0 ] || fail "Config could not be loaded after configuration."
+    config_looks_valid || fail "Config is still invalid after configuration."
+  fi
+
+  # Normalize shell-escaped tilde from printf %q, for example \~/folder.
+  LOCAL_BACKUP_DIR="${LOCAL_BACKUP_DIR#\\}"
+}
+
+
+configure() {
+  echo "[$APP] Configuration"
+  echo "INSIDER4 owns SSH, clipboard, project directory, Docker services and backup tunnel."
+  echo "It also writes a compatible papier2 config."
+  echo "Press Enter to keep the default value shown in brackets."
+  echo
+
+  read -rp "SSH target, example user@example-server: " ssh_target
+  ssh_target="$(sanitize_ssh_target "$ssh_target")"
+  [ -n "$ssh_target" ] || fail "SSH target cannot be empty."
+
+  read -rp "Clipboard tunnel port [${DEFAULT_PORT}]: " port
+  port="${port:-$DEFAULT_PORT}"
+
+  read -rp "Backup tunnel port [${DEFAULT_BACKUP_PORT}]: " backup_port
+  backup_port="${backup_port:-$DEFAULT_BACKUP_PORT}"
+
+  read -rp "Remote project directory [${DEFAULT_PROJECT_DIR}]: " project_dir
+  project_dir="${project_dir:-$DEFAULT_PROJECT_DIR}"
+
+  read -rp "Docker frontend service [${DEFAULT_FRONT_SERVICE}]: " front_service
+  front_service="${front_service:-$DEFAULT_FRONT_SERVICE}"
+
+  read -rp "Docker backend service [${DEFAULT_BACK_SERVICE}]: " back_service
+  back_service="${back_service:-$DEFAULT_BACK_SERVICE}"
+
+  read -rp "Local backup directory [${DEFAULT_LOCAL_BACKUP_DIR}]: " local_backup_dir
+  local_backup_dir="${local_backup_dir:-$DEFAULT_LOCAL_BACKUP_DIR}"
+
+  write_config "$ssh_target" "$port" "$backup_port" "$project_dir" "$front_service" "$back_service" "$local_backup_dir"
+}
+
+set_value() {
+  load_config
+
+  case "${1:-}" in
+    target|ssh|host)
+      [ -n "${2:-}" ] || fail "Usage: insider4 target user@example-server"
+      SSH_TARGET="$(sanitize_ssh_target "$2")"
+      ;;
+    project|dir)
+      [ -n "${2:-}" ] || fail "Usage: insider4 project my-project"
+      PROJECT_DIR="$2"
+      ;;
+    port)
+      [ -n "${2:-}" ] || fail "Usage: insider4 port 19999"
+      PORT="$2"
+      ;;
+    backup-port)
+      [ -n "${2:-}" ] || fail "Usage: insider4 backup-port 20000"
+      BACKUP_PORT="$2"
+      ;;
+    front)
+      [ -n "${2:-}" ] || fail "Usage: insider4 front frontend"
+      FRONT_SERVICE="$2"
+      ;;
+    back|backend)
+      [ -n "${2:-}" ] || fail "Usage: insider4 back backend"
+      BACK_SERVICE="$2"
+      ;;
+    backup-dir|local-backup-dir)
+      [ -n "${2:-}" ] || fail "Usage: insider4 backup-dir '~/insider4-backups'"
+      LOCAL_BACKUP_DIR="$2"
+      ;;
+    *)
+      fail "Unknown config key. Use: target, project, port, backup-port, front, back, backup-dir"
+      ;;
+  esac
+
+  write_config "$SSH_TARGET" "$PORT" "$BACKUP_PORT" "$PROJECT_DIR" "$FRONT_SERVICE" "$BACK_SERVICE" "$LOCAL_BACKUP_DIR"
+}
+
+setup_key() {
+  load_config
+  need ssh-copy-id
+
+  echo "[$APP] Installing your SSH key on $SSH_TARGET"
+  ssh-copy-id "$SSH_TARGET"
+}
+
+start_clipboard_receiver() {
+  local port="$1"
+  local copy_cmd="$2"
+  local debug_file="/tmp/insider4_clip_debug.txt"
+
+  echo "[$APP] Cleaning old clipboard channel on 127.0.0.1:${port}..."
+  pkill -f "nc -l 127.0.0.1 ${port}" 2>/dev/null || true
+  rm -f "$debug_file"
+
+  echo "[$APP] Opening local clipboard channel on 127.0.0.1:${port}"
+  echo "[$APP] Debug file: $debug_file"
+
+  (
+    while true; do
+      nc -l 127.0.0.1 "$port" | tee "$debug_file" | bash -lc "$copy_cmd"
+    done
+  ) &
+
+  CLIP_PID=$!
+}
+
+start_backup_receiver() {
+  local port="$1"
+  local local_dir_raw="$2"
+  local local_dir
+  local_dir="$(expand_local_dir "$local_dir_raw")"
+
+  mkdir -p "$local_dir"
+
+  echo "[$APP] Cleaning old backup channel on 127.0.0.1:${port}..."
+  pkill -f "insider4-backup-receiver.*${port}" 2>/dev/null || true
+
+  echo "[$APP] Opening local backup channel on 127.0.0.1:${port}"
+  echo "[$APP] Local backup dir: $local_dir"
+
+  python3 - "$port" "$local_dir" <<'PYRECEIVER' &
+import json
+import os
+import socket
+import sys
+import time
+from pathlib import Path
+
+port = int(sys.argv[1])
+local_dir = Path(sys.argv[2]).expanduser()
+local_dir.mkdir(parents=True, exist_ok=True)
+
+def clean_name(name: str) -> str:
+    name = os.path.basename(name or "")
+    cleaned = "".join(c for c in name if c.isalnum() or c in "._-")
+    return cleaned or f"insider4-code-backup-{time.strftime('%Y%m%d_%H%M%S')}.tar.gz"
+
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", port))
+    server.listen(5)
+
+    while True:
+        conn, _ = server.accept()
+        with conn:
+            f = conn.makefile("rb")
+            header = f.readline(65536)
+            if not header:
+                continue
+
+            try:
+                meta = json.loads(header.decode("utf-8"))
+                name = clean_name(meta.get("name", ""))
+                size = int(meta.get("size", 0))
+            except Exception:
+                continue
+
+            if size <= 0:
+                continue
+
+            final_path = local_dir / name
+            tmp_path = local_dir / f".{name}.part"
+
+            remaining = size
+            with tmp_path.open("wb") as out:
+                while remaining > 0:
+                    chunk = f.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    remaining -= len(chunk)
+
+            if remaining == 0:
+                tmp_path.replace(final_path)
+                print(f"[insider4] Backup received: {final_path}", flush=True)
+                print(f"[insider4] Size: {final_path.stat().st_size} bytes", flush=True)
+            else:
+                try:
+                    tmp_path.unlink()
+                except FileNotFoundError:
+                    pass
+                print("[insider4] Backup receive failed: incomplete transfer", flush=True)
+PYRECEIVER
+
+  BACKUP_PID=$!
+}
+
+remote_bootstrap_script() {
+  cat <<'REMOTE_SCRIPT'
+set -euo pipefail
+
+BASHRC="$HOME/.bashrc"
+START="# INSIDER4_WORKFLOW_START"
+END="# INSIDER4_WORKFLOW_END"
+
+touch "$BASHRC"
+
+tmp_bashrc="$(mktemp)"
+awk -v start="$START" -v end="$END" '
+  $0 == start { skip=1; next }
+  $0 == end { skip=0; next }
+  skip != 1 { print }
+' "$BASHRC" > "$tmp_bashrc"
+cat "$tmp_bashrc" > "$BASHRC"
+rm -f "$tmp_bashrc"
+
+{
+  echo "$START"
+  printf 'export INSIDER4_PROJECT_DIR=%q\n' "${INSIDER4_PROJECT_DIR:-~}"
+  printf 'export INSIDER4_FRONT_SERVICE=%q\n' "${INSIDER4_FRONT_SERVICE:-frontend}"
+  printf 'export INSIDER4_BACK_SERVICE=%q\n' "${INSIDER4_BACK_SERVICE:-backend}"
+  printf 'export INSIDER4_PORT=%q\n' "${INSIDER4_PORT:-19999}"
+  printf 'export INSIDER4_BACKUP_PORT=%q\n' "${INSIDER4_BACKUP_PORT:-20000}"
+
+  cat <<'I4BLOCK'
+
+pc() {
+  bash -lc "$*" 2>&1 | tee /tmp/pc.last >(timeout 3 nc 127.0.0.1 "$INSIDER4_PORT" >/dev/null 2>&1 || true)
+}
+
+_i4_expand_dir() {
+  local value="$1"
+  case "$value" in
+    "~") printf "%s\n" "$HOME" ;;
+    "~/"*) printf "%s\n" "$HOME/${value#~/}" ;;
+    /*) printf "%s\n" "$value" ;;
+    *) printf "%s\n" "$HOME/$value" ;;
+  esac
+}
+
+_i4_root() {
+  local root
+  root="$(_i4_expand_dir "$INSIDER4_PROJECT_DIR")"
+  cd "$root" || {
+    echo "[insider4] Project directory not found: $root" >&2
+    return 1
+  }
+}
+
+_i4_git_pre_save() {
+  local scope="${1:-patch}"
+
+  _i4_root || return 1
+
+  if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "[insider4] Not a Git repository. Skipping Git pre-save."
+    return 0
+  fi
+
+  git add -A
+
+  if git diff --cached --quiet; then
+    echo "[insider4] No tracked changes to commit before $scope."
+  else
+    local ts
+    ts="$(date +%Y%m%d_%H%M%S)"
+    git commit -m "insider4 pre-$scope $ts"
+  fi
+
+  git status --short
+}
+
+_i4_python_stdin() {
+  local workdir="$1"
+  local tmp
+  tmp="$(mktemp /tmp/insider4-patch.XXXXXX.py)"
+
+  cat > "$tmp"
+
+  if [ ! -s "$tmp" ]; then
+    echo "[insider4] Empty Python patch. Nothing to run." >&2
+    rm -f "$tmp"
+    return 1
+  fi
+
+  cd "$workdir" || {
+    echo "[insider4] Workdir not found: $workdir" >&2
+    rm -f "$tmp"
+    return 1
+  }
+
+  python3 "$tmp"
+  local code=$?
+
+  rm -f "$tmp"
+  return "$code"
+}
+
+_i4_rebuild() {
+  _i4_root || return 1
+
+  echo "[insider4] Docker rebuild: $*"
+  docker compose up -d --build "$@"
+
+  echo
+  docker compose ps
+
+  echo
+  echo "[insider4] Logs hidden by default. Use I4LOGS to inspect logs."
+}
+
+I4LOGS() {
+  _i4_root || return 1
+
+  if [ "$#" -gt 0 ]; then
+    docker compose logs --tail=120 "$@"
+  else
+    docker compose logs --tail=120 "$INSIDER4_FRONT_SERVICE" "$INSIDER4_BACK_SERVICE"
+  fi
+}
+
+FT() {
+  local root
+  root="$(_i4_expand_dir "$INSIDER4_PROJECT_DIR")"
+
+  _i4_git_pre_save "frontend" || return 1
+  _i4_python_stdin "$root/frontend" || return 1
+  _i4_rebuild "$INSIDER4_FRONT_SERVICE"
+}
+
+BC() {
+  local root
+  root="$(_i4_expand_dir "$INSIDER4_PROJECT_DIR")"
+
+  _i4_git_pre_save "backend" || return 1
+  _i4_python_stdin "$root/backend" || return 1
+  _i4_rebuild "$INSIDER4_BACK_SERVICE"
+}
+
+FTBC() {
+  local root
+  root="$(_i4_expand_dir "$INSIDER4_PROJECT_DIR")"
+
+  _i4_git_pre_save "full" || return 1
+  _i4_python_stdin "$root" || return 1
+  _i4_rebuild "$INSIDER4_FRONT_SERVICE" "$INSIDER4_BACK_SERVICE"
+}
+
+SV() {
+  _i4_root || return 1
+
+  local root parent base safe_base ts archive last_file
+  root="$(_i4_expand_dir "$INSIDER4_PROJECT_DIR")"
+  parent="$(dirname "$root")"
+  base="$(basename "$root")"
+  safe_base="$(printf "%s" "$base" | tr -cd "A-Za-z0-9._-")"
+  [ -n "$safe_base" ] || safe_base="insider4-project"
+
+  ts="$(date +%Y%m%d_%H%M%S)"
+  archive="/tmp/${safe_base}-${ts}.tar.gz"
+  last_file="$HOME/.insider4-last-backup"
+
+  echo "[insider4] Creating CODE-ONLY backup:"
+  echo "[insider4] $archive"
+
+  tar -czf "$archive" \
+    --exclude=".git" \
+    --exclude=".github" \
+    --exclude="node_modules" \
+    --exclude="*/node_modules" \
+    --exclude="dist" \
+    --exclude="*/dist" \
+    --exclude="build" \
+    --exclude="*/build" \
+    --exclude=".next" \
+    --exclude="*/.next" \
+    --exclude=".nuxt" \
+    --exclude="*/.nuxt" \
+    --exclude=".vite" \
+    --exclude="*/.vite" \
+    --exclude=".turbo" \
+    --exclude="*/.turbo" \
+    --exclude="coverage" \
+    --exclude="*/coverage" \
+    --exclude=".cache" \
+    --exclude="*/.cache" \
+    --exclude="cache" \
+    --exclude="*/cache" \
+    --exclude="logs" \
+    --exclude="*/logs" \
+    --exclude="tmp" \
+    --exclude="*/tmp" \
+    --exclude="temp" \
+    --exclude="*/temp" \
+    --exclude="uploads" \
+    --exclude="*/uploads" \
+    --exclude="upload" \
+    --exclude="*/upload" \
+    --exclude="media" \
+    --exclude="*/media" \
+    --exclude="videos" \
+    --exclude="*/videos" \
+    --exclude="backup" \
+    --exclude="*/backup" \
+    --exclude="backups" \
+    --exclude="*/backups" \
+    --exclude="*.log" \
+    --exclude="*.bak" \
+    --exclude="*.backup" \
+    --exclude="*.old" \
+    --exclude="*.orig" \
+    --exclude="*.tmp" \
+    --exclude="*.tar" \
+    --exclude="*.tar.gz" \
+    --exclude="*.tgz" \
+    --exclude="*.zip" \
+    --exclude="*.7z" \
+    --exclude="*.rar" \
+    --exclude="*.gz" \
+    --exclude="*.mp4" \
+    --exclude="*.mov" \
+    --exclude="*.webm" \
+    --exclude="*.mkv" \
+    --exclude="*.avi" \
+    --exclude="*.mp3" \
+    --exclude="*.wav" \
+    --exclude="*.flac" \
+    --exclude="*.sqlite" \
+    --exclude="*.sqlite3" \
+    --exclude="*.db" \
+    --exclude="*.dump" \
+    --exclude=".env" \
+    --exclude=".env.*" \
+    -C "$parent" "$base"
+
+  printf "%s\n" "$archive" > "$last_file"
+
+  echo "[insider4] Archive created:"
+  ls -lh "$archive"
+
+  echo "[insider4] Backup ready on remote server."
+  echo "[insider4] Pull it from your local machine with: insider4 pull-backup"
+}
+
+
+SD() {
+  local archive file_name size
+
+  archive="$(cat "$HOME/.insider4-last-backup" 2>/dev/null || true)"
+  archive="$(printf "%s" "$archive" | tr -d "\r" | head -n 1)"
+
+  if [ -z "$archive" ] || [ ! -f "$archive" ]; then
+    echo "[insider4] No backup archive found. Run SV first." >&2
+    return 1
+  fi
+
+  case "$archive" in
+    /tmp/*.tar.gz) ;;
+    *)
+      echo "[insider4] Refusing suspicious backup path: $archive" >&2
+      return 1
+      ;;
+  esac
+
+  file_name="$(basename "$archive")"
+  size="$(wc -c < "$archive" | tr -d " ")"
+
+  echo "[insider4] SD: sending backup to local PC through INSIDER4 tunnel."
+  echo "[insider4] File: $archive"
+  echo "[insider4] Size: $size bytes"
+
+  python3 - "$archive" "$file_name" "$size" "$INSIDER4_BACKUP_PORT" <<'PYSD'
+import json
+import socket
+import sys
+from pathlib import Path
+
+archive = Path(sys.argv[1])
+name = sys.argv[2]
+size = int(sys.argv[3])
+port = int(sys.argv[4])
+
+meta = json.dumps({"name": name, "size": size}).encode("utf-8") + b"\n"
+
+with socket.create_connection(("127.0.0.1", port), timeout=20) as sock:
+    sock.sendall(meta)
+    with archive.open("rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            sock.sendall(chunk)
+PYSD
+
+  echo "[insider4] SD done."
+}
+
+SVSD() {
+  SV || return 1
+  SD
+}
+
+# INSIDER4_CONTEXT_HELPERS_START
+
+_i4_ctx_dir() {
+  mkdir -p "$HOME/.insider4/contexts"
+  printf "%s\n" "$HOME/.insider4/contexts"
+}
+
+_i4_project_key() {
+  local root base key
+  root="$(_i4_expand_dir "$INSIDER4_PROJECT_DIR")"
+  base="$(basename "$root")"
+  key="$(printf "%s" "$base" | tr -cd "A-Za-z0-9._-")"
+  [ -n "$key" ] || key="project"
+  printf "%s\n" "$key"
+}
+
+_i4_workflow_file() {
+  printf "%s\n" "$(_i4_ctx_dir)/INSIDER4_WORKFLOW.md"
+}
+
+_i4_recap_file() {
+  printf "%s\n" "$(_i4_ctx_dir)/$(_i4_project_key).RECAP.md"
+}
+
+_i4_copy_file_to_local_clipboard() {
+  local file="$1"
+
+  [ -f "$file" ] || {
+    echo "[insider4] File not found: $file" >&2
+    return 1
+  }
+
+  cat "$file" > /tmp/pc.last
+  timeout 3 nc 127.0.0.1 "$INSIDER4_PORT" < "$file" >/dev/null 2>&1 || true
+}
+
+_i4_init_workflow_context() {
+  local file
+  file="$(_i4_workflow_file)"
+
+  if [ ! -f "$file" ]; then
+    {
+      echo "# INSIDER4 Workflow Context"
+      echo
+      echo "INSIDER4 is an AI-assisted remote development workflow."
+      echo
+      echo "## Core commands"
+      echo
+      echo "- pc: run a shell command and copy output to the local clipboard."
+      echo "- FT: run a Python patch from the frontend directory, then rebuild frontend."
+      echo "- BC: run a Python patch from the backend directory, then rebuild backend."
+      echo "- FTBC: run a Python patch from the project root, then rebuild frontend and backend."
+      echo "- SV: create a code-only backup archive on the VPS."
+      echo "- SD: send the last backup from the VPS to the local PC through the INSIDER4 tunnel."
+      echo "- SVSD: create a code-only backup, then send it to the local PC."
+      echo "- I4LOGS: show Docker logs only when needed."
+      echo "- I4STATUS: show Git, Docker and backup status."
+      echo "- I4DOCTOR: check remote dependencies and project state."
+      echo "- contexte / CTX: copy this workflow context to the local clipboard."
+      echo "- recap / RECAP: copy a prompt asking the AI to generate a project recap writer."
+      echo "- recup / RECUP: copy the stored project recap to the local clipboard."
+      echo
+      echo "## Rules for AI patches"
+      echo
+      echo "- Prefer Python patch scripts."
+      echo "- Keep patches small and reversible."
+      echo "- Avoid secrets, tokens, passwords, private IPs, emails, or personal data."
+      echo "- FT, BC, and FTBC run a Git pre-save before patch execution."
+      echo "- Context and recap files are stored outside the project repo in ~/.insider4/contexts."
+    } > "$file"
+  fi
+
+  printf "%s\n" "$file"
+}
+
+_i4_init_project_recap() {
+  local file
+  file="$(_i4_recap_file)"
+
+  if [ ! -f "$file" ]; then
+    {
+      echo "# Project Recap"
+      echo
+      echo "No project recap has been written yet."
+      echo
+      echo "Run recap, paste the copied prompt into the AI, then run the Python script returned by the AI on the VPS."
+    } > "$file"
+  fi
+
+  printf "%s\n" "$file"
+}
+
+contexte() {
+  local file
+  file="$(_i4_init_workflow_context)"
+  _i4_copy_file_to_local_clipboard "$file"
+  echo "[insider4] Workflow context copied to local clipboard:"
+  echo "$file"
+}
+
+CTX() {
+  contexte "$@"
+}
+
+recup() {
+  local file
+  file="$(_i4_init_project_recap)"
+  _i4_copy_file_to_local_clipboard "$file"
+  echo "[insider4] Project recap copied to local clipboard:"
+  echo "$file"
+}
+
+RECUP() {
+  recup "$@"
+}
+
+recap() {
+  local file tmp key
+  file="$(_i4_init_project_recap)"
+  key="$(_i4_project_key)"
+  tmp="$(mktemp /tmp/insider4-recap-prompt.XXXXXX.txt)"
+
+  {
+    echo "You are helping me maintain a reusable project recap for an INSIDER4 remote development workflow."
+    echo
+    echo "Goal:"
+    echo "Write an updated, concise but complete project recap for the next AI session."
+    echo
+    echo "Rules:"
+    echo "- Keep useful project context, architecture decisions, active bugs, commands, and workflow conventions."
+    echo "- Remove noisy logs, obsolete debugging, repetitions, and irrelevant details."
+    echo "- Do not include secrets, tokens, passwords, private IPs, emails, or personal data."
+    echo "- Return ONLY one Python script command that writes the recap file on the VPS."
+    echo
+    echo "The recap file path is:"
+    echo "$file"
+    echo
+    echo "Return format:"
+    echo "python3 <<'PY'"
+    echo "from pathlib import Path"
+    echo "p = Path.home() / '.insider4' / 'contexts' / '${key}.RECAP.md'"
+    echo "p.parent.mkdir(parents=True, exist_ok=True)"
+    echo "p.write_text(\"\"\""
+    echo "# Project Recap"
+    echo
+    echo "...updated recap here..."
+    echo "\"\"\".strip() + '\\n', encoding='utf-8')"
+    echo "print('recap written:', p)"
+    echo "PY"
+    echo
+    echo "Current stored recap:"
+    echo "----- BEGIN CURRENT RECAP -----"
+    cat "$file"
+    echo "----- END CURRENT RECAP -----"
+  } > "$tmp"
+
+  _i4_copy_file_to_local_clipboard "$tmp"
+  rm -f "$tmp"
+
+  echo "[insider4] Recap prompt copied to local clipboard."
+  echo "[insider4] Paste it into the AI. It should return a Python script that rewrites:"
+  echo "$file"
+}
+
+RECAP() {
+  recap "$@"
+}
+
+RC() {
+  recap "$@"
+}
+
+# INSIDER4_CONTEXT_HELPERS_END
+I4STATUS() {
+  echo "[insider4] Project: $INSIDER4_PROJECT_DIR"
+  echo "[insider4] Frontend service: $INSIDER4_FRONT_SERVICE"
+  echo "[insider4] Backend service: $INSIDER4_BACK_SERVICE"
+  echo
+
+  _i4_root || return 1
+
+  echo "===== Git status ====="
+  git status --short || true
+
+  echo
+  echo "===== Last commits ====="
+  git log --oneline -5 || true
+
+  echo
+  echo "===== Docker services ====="
+  docker compose ps || true
+
+  echo
+  echo "===== Last backup ====="
+  cat "$HOME/.insider4-last-backup" 2>/dev/null || echo "No backup yet."
+}
+
+I4DOCTOR() {
+  echo "[insider4] Remote doctor"
+  echo
+
+  local ok=1
+
+  check_cmd() {
+    if command -v "$1" >/dev/null 2>&1; then
+      echo "OK   command: $1"
+    else
+      echo "MISS command: $1"
+      ok=0
+    fi
+  }
+
+  check_cmd bash
+  check_cmd git
+  check_cmd docker
+  check_cmd python3
+  check_cmd nc
+  check_cmd tar
+
+  echo
+  echo "===== Project ====="
+  echo "Project: $INSIDER4_PROJECT_DIR"
+
+  if _i4_root; then
+    echo "OK   project directory"
+  else
+    echo "BAD  project directory"
+    ok=0
+  fi
+
+  echo
+  echo "===== Git ====="
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "OK   git repository"
+    git status --short || true
+  else
+    echo "WARN not a git repository"
+  fi
+
+  echo
+  echo "===== Docker Compose ====="
+  if docker compose ps --services >/dev/null 2>&1; then
+    echo "OK   docker compose"
+    docker compose ps --services
+  else
+    echo "WARN docker compose not available or no compose file here"
+  fi
+
+  echo
+  if [ "$ok" -eq 1 ]; then
+    echo "[insider4] Remote doctor OK."
+  else
+    echo "[insider4] Remote doctor found issues."
+    return 1
+  fi
+}
+
+
+I4HELP() {
+  cat <<'HELP'
+INSIDER4 remote helpers
+
+Copy command output to local clipboard:
+  pc 'your command here'
+
+Frontend patch + Git pre-save + Docker rebuild:
+  FT <<'PY'
+  # Python patch, working directory: project/frontend
+  PY
+
+Backend patch + Git pre-save + Docker rebuild:
+  BC <<'PY'
+  # Python patch, working directory: project/backend
+  PY
+
+Full project patch + Git pre-save + Docker rebuild:
+  FTBC <<'PY'
+  # Python patch, working directory: project root
+  PY
+
+Create code-only backup on the VPS:
+  SV
+
+Send last backup to local PC through the INSIDER4 tunnel:
+  SD
+
+Create backup then send it:
+  SVSD
+
+Logs on demand:
+  I4LOGS
+  I4LOGS frontend
+  I4LOGS backend
+
+Status:
+  I4STATUS
+
+Remote diagnostics:
+  I4DOCTOR
+HELP
+}
+
+NDSTATUS() { I4STATUS "$@"; }
+NDHELP() { I4HELP "$@"; }
+I4BLOCK
+
+  echo "$END"
+} >> "$BASHRC"
+
+case "$INSIDER4_PROJECT_DIR" in
+  "~") cd "$HOME" ;;
+  "~/"*) cd "$HOME/${INSIDER4_PROJECT_DIR#~/}" ;;
+  /*) cd "$INSIDER4_PROJECT_DIR" ;;
+  *) cd "$HOME/$INSIDER4_PROJECT_DIR" ;;
+esac 2>/dev/null || cd "$HOME"
+
+exec bash -i
+REMOTE_SCRIPT
+}
+
+connect() {
+  load_config
+
+  need ssh
+  need nc
+  need python3
+
+  write_config "$SSH_TARGET" "$PORT" "$BACKUP_PORT" "$PROJECT_DIR" "$FRONT_SERVICE" "$BACK_SERVICE" "$LOCAL_BACKUP_DIR"
+
+  local copy_cmd
+  copy_cmd="$(clipboard_command)"
+
+  start_clipboard_receiver "$PORT" "$copy_cmd"
+  start_backup_receiver "$BACKUP_PORT" "$LOCAL_BACKUP_DIR"
+  # Backups are pulled with scp; no long-running backup receiver.
+
+  cleanup() {
+    echo
+    echo "[$APP] Closing local channels..."
+    kill "${CLIP_PID:-}" 2>/dev/null || true
+    kill "${BACKUP_PID:-}" 2>/dev/null || true
+  }
+  trap cleanup EXIT INT TERM
+
+  local rs
+  rs="$(remote_bootstrap_script)"
+
+  echo
+  echo "[$APP] Connecting with one SSH session."
+  echo "[$APP] Project directory: $PROJECT_DIR"
+  echo "[$APP] Clipboard port: $PORT"
+  echo "[$APP] Backup mode: code-only archive, pull with scp"
+  echo "[$APP] Enter your SSH password if prompted."
+  echo
+
+  ssh -t \
+    -R "127.0.0.1:${PORT}:127.0.0.1:${PORT}" \
+    -R "127.0.0.1:${BACKUP_PORT}:127.0.0.1:${BACKUP_PORT}" \
+    "$SSH_TARGET" \
+    "INSIDER4_PROJECT_DIR=$(printf "%q" "$PROJECT_DIR") INSIDER4_FRONT_SERVICE=$(printf "%q" "$FRONT_SERVICE") INSIDER4_BACK_SERVICE=$(printf "%q" "$BACK_SERVICE") INSIDER4_PORT=$(printf "%q" "$PORT") INSIDER4_BACKUP_PORT=$(printf "%q" "$BACKUP_PORT") bash -lc $(printf "%q" "$rs")"
+}
+
+pull_backup() {
+  load_config
+  need ssh
+  need scp
+
+  local local_dir remote_path file_name
+  local_dir="$(expand_local_dir "$LOCAL_BACKUP_DIR")"
+  mkdir -p "$local_dir"
+
+  remote_path="$(ssh "$SSH_TARGET" 'cat ~/.insider4-last-backup 2>/dev/null || true')"
+  remote_path="$(printf "%s" "$remote_path" | tr -d "\r" | head -n 1)"
+
+  [ -n "$remote_path" ] || fail "No remote backup found. Run SV first."
+
+  case "$remote_path" in
+    /tmp/*.tar.gz) ;;
+    *) fail "Refusing suspicious remote backup path: $remote_path" ;;
+  esac
+
+  file_name="$(basename "$remote_path")"
+
+  echo "[$APP] Pulling backup with scp."
+  echo "[$APP] Remote: $remote_path"
+  echo "[$APP] Local:  $local_dir/$file_name"
+
+  scp "$SSH_TARGET:$remote_path" "$local_dir/"
+
+  echo "[$APP] Backup pulled:"
+  ls -lh "$local_dir/$file_name"
+}
+
+backup() {
+  load_config
+  need ssh
+
+  echo "[$APP] Creating code-only backup remotely..."
+  ssh -t "$SSH_TARGET" 'bash -lc "source ~/.bashrc && SV"'
+
+  echo
+  pull_backup
+}
+
+
+doctor() {
+  echo "[$APP] Doctor"
+  echo
+
+  local ok=1
+
+  check_cmd() {
+    if command -v "$1" >/dev/null 2>&1; then
+      echo "OK   command: $1"
+    else
+      echo "MISS command: $1"
+      ok=0
+    fi
+  }
+
+  check_cmd bash
+  check_cmd ssh
+  check_cmd nc
+  check_cmd python3
+
+  if command -v xclip >/dev/null 2>&1 || command -v wl-copy >/dev/null 2>&1 || command -v pbcopy >/dev/null 2>&1 || command -v clip.exe >/dev/null 2>&1; then
+    echo "OK   clipboard tool"
+  else
+    echo "MISS clipboard tool: install xclip, wl-clipboard, pbcopy, or clip.exe"
+    ok=0
+  fi
+
+  if command -v ssh-copy-id >/dev/null 2>&1; then
+    echo "OK   ssh-copy-id"
+  else
+    echo "WARN ssh-copy-id missing: insider4 key may not work"
+  fi
+
+  echo
+  echo "===== Config files ====="
+
+  if [ -f "$CONFIG_FILE" ]; then
+    echo "OK   insider4 config: $CONFIG_FILE"
+  else
+    echo "MISS insider4 config: run insider4 config"
+    ok=0
+  fi
+
+  if [ -f "$PAPIER2_CONFIG_FILE" ]; then
+    echo "OK   papier2-compatible config: $PAPIER2_CONFIG_FILE"
+  else
+    echo "MISS papier2-compatible config: run insider4 config"
+    ok=0
+  fi
+
+  echo
+  echo "===== Config validation ====="
+
+  if [ -f "$CONFIG_FILE" ]; then
+    SSH_TARGET=""
+    PORT="$DEFAULT_PORT"
+    BACKUP_PORT="$DEFAULT_BACKUP_PORT"
+    PROJECT_DIR="$DEFAULT_PROJECT_DIR"
+    FRONT_SERVICE="$DEFAULT_FRONT_SERVICE"
+    BACK_SERVICE="$DEFAULT_BACK_SERVICE"
+    LOCAL_BACKUP_DIR="$DEFAULT_LOCAL_BACKUP_DIR"
+
+    set +e
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE"
+    local source_status=$?
+    set -e
+
+    if [ "$source_status" -eq 0 ] && config_looks_valid; then
+      echo "OK   insider4 config is valid"
+      echo "INFO target: $SSH_TARGET"
+      echo "INFO project: $PROJECT_DIR"
+      echo "INFO frontend service: $FRONT_SERVICE"
+      echo "INFO backend service: $BACK_SERVICE"
+      echo "INFO local backup dir: ${LOCAL_BACKUP_DIR#\\}"
+    else
+      echo "BAD  insider4 config is invalid: run insider4 config"
+      ok=0
+    fi
+  fi
+
+  echo
+  if [ "$ok" -eq 1 ]; then
+    echo "[$APP] Doctor OK."
+  else
+    echo "[$APP] Doctor found issues."
+    return 1
+  fi
+}
+
+
+status() {
+  echo "[$APP] config:"
+  if [ -f "$CONFIG_FILE" ]; then
+    cat "$CONFIG_FILE"
+  else
+    echo "No config found."
+  fi
+
+  echo
+  echo "[$APP] compatible papier2 config:"
+  if [ -f "$PAPIER2_CONFIG_FILE" ]; then
+    cat "$PAPIER2_CONFIG_FILE"
+  else
+    echo "No papier2 config found."
+  fi
+}
+
+reset_config() {
+  rm -f "$CONFIG_FILE" "$PAPIER2_CONFIG_FILE"
+  echo "[$APP] Config deleted."
+  echo "[$APP] Compatible papier2 config deleted."
+}
+
+help() {
+  cat <<'HELP'
+insider4 — AI-assisted remote development workflow
+
+INSIDER4 is the parent workflow.
+It configures SSH, clipboard, project directory, Docker services and a secure code-only backup tunnel.
+It also writes a compatible papier2 config.
+
+Local commands:
+  insider4                         Connect with one SSH session
+  insider4 config                  Configure everything
+  insider4 key                     Install SSH key on the configured target
+  insider4 status                  Show configs
+  insider4 doctor                  Check local dependencies and config
+  insider4 reset                   Delete INSIDER4 and compatible papier2 configs
+
+Change one setting:
+  insider4 target VALUE
+  insider4 project VALUE
+  insider4 port VALUE
+  insider4 backup-port VALUE
+  insider4 front VALUE
+  insider4 back VALUE
+  insider4 backup-dir VALUE
+
+Remote helpers:
+  pc 'command'                     Copy command output to local clipboard
+  FT <<'PY' ... PY                 Python patch + Git pre-save + rebuild frontend
+  BC <<'PY' ... PY                 Python patch + Git pre-save + rebuild backend
+  FTBC <<'PY' ... PY               Python patch + Git pre-save + rebuild both
+  SV                               Create code-only backup on the VPS
+  SD                               Send last backup to local PC through tunnel
+  SVSD                             Create backup then send it through tunnel
+  I4LOGS                           Show Docker logs on demand
+  I4STATUS                         Show Git, Docker and backup status
+  I4DOCTOR                         Check remote dependencies and project
+  I4HELP                           Show remote helper help
+  contexte                        Copy INSIDER4 workflow context
+  recap                            Copy AI recap prompt
+  recup                            Copy stored project recap
+HELP
+}
+
+case "${1:-connect}" in
+  connect) connect ;;
+  config) configure ;;
+  key|ssh-key) setup_key ;;
+  pull-backup|pull) pull_backup ;;
+  backup|sv) backup ;;
+  status) status ;;
+  doctor) doctor ;;
+  reset) reset_config ;;
+  target|ssh|host) set_value target "${2:-}" ;;
+  project|dir) set_value project "${2:-}" ;;
+  port) set_value port "${2:-}" ;;
+  backup-port) set_value backup-port "${2:-}" ;;
+  front) set_value front "${2:-}" ;;
+  back|backend) set_value back "${2:-}" ;;
+  backup-dir|local-backup-dir) set_value backup-dir "${2:-}" ;;
+  help|-h|--help) help ;;
+  *) fail "Unknown command: $1. Try: insider4 help" ;;
+esac
