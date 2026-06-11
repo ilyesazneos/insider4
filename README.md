@@ -666,3 +666,14 @@ insider4
 ## License
 
 MIT
+## Context, tree, recap and recovery workflow
+
+`contexte` / `context` now copies a fresh context bundle to the local clipboard. The bundle contains the INSIDER4 workflow instructions and a generated Markdown project tree snapshot from the configured project directory.
+
+`recup` now copies a complete session-start bundle: workflow instructions, fresh project tree snapshot, and the latest project recap.
+
+`recap` is the normal end-of-session command. It copies a clear prompt asking the AI to return one copyable `bash` block containing a `python3` heredoc. The Python script writes a new timestamped recap file and updates the stable latest recap alias.
+
+`recap --base64` is the fallback when the chat UI breaks copyable code blocks. It asks the AI to return only base64. Then run `recap64`, paste the base64, press Ctrl-D, review the decoded script preview, and confirm.
+
+Generated context, tree, session, workflow, and recap files are stored under `~/.insider4/contexts`. Timestamped history files are preserved; stable `*.md` paths are only latest aliases.

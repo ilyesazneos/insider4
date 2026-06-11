@@ -836,6 +836,574 @@ RC() {
 }
 
 # INSIDER4_CONTEXT_HELPERS_END
+# INSIDER4_CONTEXT_HELPERS_V3_START
+# V3 override: clearer recap prompt, base64 fallback, tree snapshots, context bundles, recap history.
+
+_i4_ctx_dir() {
+  mkdir -p "$HOME/.insider4/contexts"
+  printf "%s\n" "$HOME/.insider4/contexts"
+}
+
+_i4_project_key() {
+  local root base key
+  root="$(_i4_expand_dir "$INSIDER4_PROJECT_DIR")"
+  base="$(basename "$root")"
+  key="$(printf "%s" "$base" | tr -cd "A-Za-z0-9._-")"
+  [ -n "$key" ] || key="project"
+  printf "%s\n" "$key"
+}
+
+_i4_ts() { date +%Y%m%d_%H%M%S; }
+
+_i4_copy_file_to_local_clipboard() {
+  local file="$1"
+  [ -f "$file" ] || { echo "[insider4] File not found: $file" >&2; return 1; }
+  cat "$file" > /tmp/pc.last
+  timeout 3 nc 127.0.0.1 "$INSIDER4_PORT" < "$file" >/dev/null 2>&1 || true
+}
+
+_i4_latest_alias() {
+  local kind="$1"
+  printf "%s\n" "$(_i4_ctx_dir)/$(_i4_project_key).${kind}.md"
+}
+
+_i4_new_history_file() {
+  local kind="$1"
+  printf "%s\n" "$(_i4_ctx_dir)/$(_i4_project_key).${kind}.$(_i4_ts).md"
+}
+
+_i4_set_latest_alias() {
+  local file="$1" alias="$2"
+  [ -f "$file" ] || return 0
+  [ "$file" = "$alias" ] && return 0
+  rm -f "$alias"
+  ln -s "$(basename "$file")" "$alias" 2>/dev/null || cp "$file" "$alias"
+}
+
+_i4_recap_latest_alias() { _i4_latest_alias "RECAP"; }
+_i4_tree_latest_alias() { _i4_latest_alias "TREE"; }
+_i4_context_latest_alias() { _i4_latest_alias "CONTEXT"; }
+_i4_session_latest_alias() { _i4_latest_alias "SESSION"; }
+
+_i4_latest_recap_file() {
+  local ctx key latest alias
+  ctx="$(_i4_ctx_dir)"
+  key="$(_i4_project_key)"
+  alias="$ctx/${key}.RECAP.md"
+  latest="$(ls -1t "$ctx/${key}.RECAP."*.md 2>/dev/null | head -n 1 || true)"
+  if [ -n "$latest" ] && [ -f "$latest" ]; then
+    printf "%s\n" "$latest"
+  elif [ -f "$alias" ]; then
+    printf "%s\n" "$alias"
+  else
+    printf "%s\n" "$alias"
+  fi
+}
+
+_i4_new_recap_file() { _i4_new_history_file "RECAP"; }
+_i4_recap_file() { _i4_latest_recap_file; }
+
+_i4_workflow_context_content() {
+  cat <<'I4_WORKFLOW_MD'
+# INSIDER4 Workflow Context
+
+INSIDER4 is an AI-assisted remote development workflow. It connects a local machine to a remote project through SSH and copies useful context back to the local clipboard.
+
+## Core commands
+
+- `pc`: run a shell command and copy output to the local clipboard.
+- `FT`: run a Python patch from `frontend/`, then rebuild the frontend Docker service.
+- `BC`: run a Python patch from `backend/`, then rebuild the backend Docker service.
+- `FTBC`: run a Python patch from the project root, then rebuild frontend and backend.
+- `SV`: create a code-only backup archive on the VPS.
+- `SD`: send the last backup from the VPS to the local PC through the INSIDER4 tunnel.
+- `SVSD`: create a code-only backup, then send it to the local PC.
+- `I4LOGS`: show Docker logs only when needed.
+- `I4STATUS`: show Git, Docker and backup status.
+- `I4DOCTOR`: check remote dependencies and project state.
+- `contexte` / `context` / `CTX`: copy a fresh context bundle to the local clipboard. The bundle includes these workflow instructions and a generated project tree snapshot.
+- `recup` / `RECUP`: copy a session-start bundle to the local clipboard. The bundle includes workflow instructions, a generated project tree snapshot, and the latest project recap.
+- `recap` / `RECAP` / `RC`: copy a clear prompt asking the AI to return one runnable Python recap-writer script.
+- `recap --base64`: copy the fallback prompt asking the AI to return only base64.
+- `recap64` / `RECAP64`: paste a base64 recap payload, decode it, preview it, then apply it after confirmation.
+- `recaps` / `RECAPS`: list local recap history files.
+- `trees` / `TREES`: list local project tree snapshot history files.
+
+## Context and tree behavior
+
+Every `contexte` and `recup` call generates a fresh Markdown project tree snapshot from the configured `INSIDER4_PROJECT_DIR`. The tree is language-agnostic and excludes heavy/generated/secret-prone paths such as `.git`, `node_modules`, build outputs, caches, virtualenvs, logs, backups, uploads, media folders, and `.env`-style files.
+
+The generated files are stored in `~/.insider4/contexts`. Timestamped history files are kept. Stable `*.md` latest aliases are updated only to point to the newest snapshot.
+
+## Rules for AI patches
+
+- Prefer Python patch scripts.
+- Keep patches small and reversible.
+- Avoid secrets, tokens, passwords, private IPs, emails, or personal data.
+- `FT`, `BC`, and `FTBC` run a Git pre-save before patch execution.
+- Recap history is timestamped; `recup` sends only the latest recap plus fresh workflow and tree context.
+I4_WORKFLOW_MD
+}
+
+_i4_init_workflow_context() {
+  local file alias
+  file="$(_i4_new_history_file "WORKFLOW")"
+  alias="$(_i4_latest_alias "WORKFLOW")"
+  _i4_workflow_context_content > "$file"
+  _i4_set_latest_alias "$file" "$alias"
+  printf "%s\n" "$file"
+}
+
+_i4_generate_project_tree() {
+  local root file alias
+  root="$(_i4_expand_dir "$INSIDER4_PROJECT_DIR")"
+  file="$(_i4_new_history_file "TREE")"
+  alias="$(_i4_tree_latest_alias)"
+
+  python3 - "$root" "$file" <<'PYTREE'
+from pathlib import Path
+import fnmatch
+import os
+import sys
+from datetime import datetime
+
+root = Path(sys.argv[1]).expanduser().resolve()
+out = Path(sys.argv[2]).expanduser()
+out.parent.mkdir(parents=True, exist_ok=True)
+
+EXCLUDE_DIRS = {
+    ".git", ".hg", ".svn", "node_modules", "vendor", "dist", "build", ".next", ".nuxt",
+    ".vite", ".turbo", "coverage", ".cache", "cache", "__pycache__", ".pytest_cache",
+    ".mypy_cache", ".ruff_cache", ".venv", "venv", "env", "logs", "log", "tmp", "temp",
+    "backup", "backups", "uploads", "upload", "media", "videos", "storage"
+}
+EXCLUDE_FILE_PATTERNS = {
+    ".env", ".env.*", "*.pem", "*.key", "*.crt", "*.p12", "*.pfx", "id_rsa*",
+    "*.sqlite", "*.sqlite3", "*.db", "*.dump", "*.log", "*.tar", "*.tar.gz", "*.tgz",
+    "*.zip", "*.7z", "*.rar", "*.mp4", "*.mov", "*.webm", "*.mkv", "*.avi", "*.mp3",
+    "*.wav", "*.flac", "*.pdf", "*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp"
+}
+MAX_DEPTH = int(os.environ.get("INSIDER4_TREE_MAX_DEPTH", "8"))
+MAX_ENTRIES = int(os.environ.get("INSIDER4_TREE_MAX_ENTRIES", "2500"))
+
+lines = []
+truncated = False
+count = 0
+
+lines.append("# Project Tree Snapshot")
+lines.append("")
+lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+lines.append(f"Project root name: `{root.name}`")
+lines.append(f"Max depth: {MAX_DEPTH}")
+lines.append(f"Max entries: {MAX_ENTRIES}")
+lines.append("")
+lines.append("Excluded: heavy/generated/cache/media/archive/secret-prone paths.")
+lines.append("")
+lines.append("```text")
+
+if not root.exists():
+    lines.append(f"[missing project directory: {root}]")
+else:
+    lines.append(f"{root.name}/")
+
+    def hidden_allowed(path: Path) -> bool:
+        return path.name in {".github", ".gitignore", ".dockerignore"}
+
+    def excluded(path: Path, is_dir: bool) -> bool:
+        name = path.name
+        if is_dir and name in EXCLUDE_DIRS:
+            return True
+        if name.startswith(".") and not hidden_allowed(path):
+            if is_dir:
+                return True
+        if not is_dir:
+            for pattern in EXCLUDE_FILE_PATTERNS:
+                if fnmatch.fnmatch(name, pattern):
+                    return True
+        return False
+
+    def walk(dir_path: Path, prefix: str = "", depth: int = 0):
+        global count, truncated
+        if depth >= MAX_DEPTH:
+            return
+        if count >= MAX_ENTRIES:
+            truncated = True
+            return
+        try:
+            children = sorted(dir_path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+        except PermissionError:
+            lines.append(prefix + "└── [permission denied]")
+            return
+        children = [c for c in children if not excluded(c, c.is_dir())]
+        for idx, child in enumerate(children):
+            if count >= MAX_ENTRIES:
+                truncated = True
+                return
+            is_last = idx == len(children) - 1
+            branch = "└── " if is_last else "├── "
+            suffix = "/" if child.is_dir() else ""
+            lines.append(prefix + branch + child.name + suffix)
+            count += 1
+            if child.is_dir():
+                walk(child, prefix + ("    " if is_last else "│   "), depth + 1)
+
+    walk(root)
+
+if truncated:
+    lines.append("...")
+    lines.append(f"[truncated after {MAX_ENTRIES} entries; adjust INSIDER4_TREE_MAX_ENTRIES if needed]")
+
+lines.append("```")
+lines.append("")
+lines.append("Notes for the AI: use this tree to understand the project structure before suggesting patches. Do not assume excluded files are absent; they were intentionally omitted from the context snapshot.")
+
+out.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+print(out)
+PYTREE
+
+  _i4_set_latest_alias "$file" "$alias"
+  printf "%s\n" "$file"
+}
+
+_i4_init_project_recap() {
+  local file
+  file="$(_i4_latest_recap_file)"
+  if [ ! -f "$file" ]; then
+    file="$(_i4_new_recap_file)"
+    {
+      echo "# Project Recap"
+      echo
+      echo "No project recap has been written yet."
+      echo
+      echo "Run recap, paste the copied prompt into the AI, then run the Python script returned by the AI on the VPS."
+    } > "$file"
+    _i4_set_latest_alias "$file" "$(_i4_recap_latest_alias)"
+  fi
+  printf "%s\n" "$file"
+}
+
+_i4_write_context_bundle() {
+  local workflow tree file alias
+  workflow="$1"
+  tree="$2"
+  file="$(_i4_new_history_file "CONTEXT")"
+  alias="$(_i4_context_latest_alias)"
+  {
+    echo "# INSIDER4 Context Bundle"
+    echo
+    echo "This bundle contains the INSIDER4 workflow instructions and a fresh project tree snapshot."
+    echo
+    echo "----- BEGIN FILE: $(basename "$workflow") -----"
+    cat "$workflow"
+    echo "----- END FILE: $(basename "$workflow") -----"
+    echo
+    echo "----- BEGIN FILE: $(basename "$tree") -----"
+    cat "$tree"
+    echo "----- END FILE: $(basename "$tree") -----"
+  } > "$file"
+  _i4_set_latest_alias "$file" "$alias"
+  printf "%s\n" "$file"
+}
+
+_i4_write_session_bundle() {
+  local workflow tree recap file alias
+  workflow="$1"
+  tree="$2"
+  recap="$3"
+  file="$(_i4_new_history_file "SESSION")"
+  alias="$(_i4_session_latest_alias)"
+  {
+    echo "# INSIDER4 Session Start Bundle"
+    echo
+    echo "This bundle contains the INSIDER4 workflow instructions, a fresh project tree snapshot, and the latest project recap."
+    echo "Use it as the starting context for the next AI coding session."
+    echo
+    echo "----- BEGIN FILE: $(basename "$workflow") -----"
+    cat "$workflow"
+    echo "----- END FILE: $(basename "$workflow") -----"
+    echo
+    echo "----- BEGIN FILE: $(basename "$tree") -----"
+    cat "$tree"
+    echo "----- END FILE: $(basename "$tree") -----"
+    echo
+    echo "----- BEGIN FILE: $(basename "$recap") -----"
+    cat "$recap"
+    echo "----- END FILE: $(basename "$recap") -----"
+  } > "$file"
+  _i4_set_latest_alias "$file" "$alias"
+  printf "%s\n" "$file"
+}
+
+contexte() {
+  local workflow tree bundle
+  workflow="$(_i4_init_workflow_context)"
+  tree="$(_i4_generate_project_tree)"
+  bundle="$(_i4_write_context_bundle "$workflow" "$tree")"
+  _i4_copy_file_to_local_clipboard "$bundle"
+  echo "[insider4] Workflow context + project tree copied to local clipboard:"
+  echo "[insider4] Bundle: $bundle"
+  echo "[insider4] Tree: $tree"
+}
+context() { contexte "$@"; }
+CONTEXT() { contexte "$@"; }
+CTX() { contexte "$@"; }
+
+recup() {
+  local workflow tree recap bundle
+  workflow="$(_i4_init_workflow_context)"
+  tree="$(_i4_generate_project_tree)"
+  recap="$(_i4_init_project_recap)"
+  bundle="$(_i4_write_session_bundle "$workflow" "$tree" "$recap")"
+  _i4_copy_file_to_local_clipboard "$bundle"
+  echo "[insider4] Workflow context + project tree + latest recap copied to local clipboard:"
+  echo "[insider4] Bundle: $bundle"
+  echo "[insider4] Tree: $tree"
+  echo "[insider4] Recap: $recap"
+}
+RECUP() { recup "$@"; }
+
+recaps() {
+  local ctx key
+  ctx="$(_i4_ctx_dir)"
+  key="$(_i4_project_key)"
+  echo "[insider4] Recap history for project key: $key"
+  ls -1t "$ctx/${key}.RECAP."*.md 2>/dev/null || echo "[insider4] No timestamped recap history yet."
+  echo
+  echo "[insider4] Latest recap alias/path: $(_i4_recap_latest_alias)"
+}
+RECAPS() { recaps "$@"; }
+
+trees() {
+  local ctx key
+  ctx="$(_i4_ctx_dir)"
+  key="$(_i4_project_key)"
+  echo "[insider4] Project tree snapshot history for project key: $key"
+  ls -1t "$ctx/${key}.TREE."*.md 2>/dev/null || echo "[insider4] No timestamped tree history yet."
+  echo
+  echo "[insider4] Latest tree alias/path: $(_i4_tree_latest_alias)"
+}
+TREES() { trees "$@"; }
+
+_i4_recap_prompt_common_context() {
+  local workflow tree current
+  workflow="$(_i4_init_workflow_context)"
+  tree="$(_i4_generate_project_tree)"
+  current="$(_i4_init_project_recap)"
+  echo "Current INSIDER4 workflow context:"
+  echo "----- BEGIN WORKFLOW CONTEXT -----"
+  cat "$workflow"
+  echo "----- END WORKFLOW CONTEXT -----"
+  echo
+  echo "Current project tree snapshot:"
+  echo "----- BEGIN PROJECT TREE -----"
+  cat "$tree"
+  echo "----- END PROJECT TREE -----"
+  echo
+  echo "Current latest project recap:"
+  echo "----- BEGIN CURRENT RECAP -----"
+  cat "$current"
+  echo "----- END CURRENT RECAP -----"
+}
+
+_i4_copy_base64_recap_prompt() {
+  local tmp target alias
+  target="$(_i4_new_recap_file)"
+  alias="$(_i4_recap_latest_alias)"
+  tmp="$(mktemp /tmp/insider4-recap64-prompt.XXXXXX.txt)"
+  {
+    echo "You are helping me maintain a reusable project recap for INSIDER4."
+    echo
+    echo "Return ONLY one base64 string. No markdown. No code fence. No explanations."
+    echo "The base64 must decode to a bash script that writes the updated recap."
+    echo
+    echo "Decoded script requirements:"
+    echo "- Use python3 to write UTF-8 Markdown safely."
+    echo "- Write the new recap to: $target"
+    echo "- Update the latest alias/path: $alias"
+    echo "- Preserve the timestamped history file."
+    echo "- Print both paths at the end."
+    echo
+    echo "The recap content must be concise, useful for the next AI coding session, and free of secrets."
+    echo
+    _i4_recap_prompt_common_context
+  } > "$tmp"
+  _i4_copy_file_to_local_clipboard "$tmp"
+  rm -f "$tmp"
+  echo "[insider4] Base64 fallback recap prompt copied to local clipboard."
+  echo "[insider4] Paste it into the AI. It should return ONLY base64. Then run recap64 to apply."
+  echo "[insider4] New recap history target: $target"
+}
+
+recap() {
+  local mode tmp target alias key
+  mode="${1:-}"
+  if [ "$mode" = "--base64" ] || [ "$mode" = "base64" ] || [ "$mode" = "64" ]; then
+    _i4_copy_base64_recap_prompt
+    return $?
+  fi
+
+  target="$(_i4_new_recap_file)"
+  alias="$(_i4_recap_latest_alias)"
+  key="$(_i4_project_key)"
+  tmp="$(mktemp /tmp/insider4-recap-prompt.XXXXXX.txt)"
+
+  {
+    echo "You are helping me maintain a reusable project recap for an INSIDER4 remote development workflow."
+    echo
+    echo "Goal: write an updated, concise but complete project recap for the next AI coding session."
+    echo
+    echo "CRITICAL OUTPUT FORMAT:"
+    echo "- Return exactly one copyable fenced code block."
+    echo "- The code block language must be bash."
+    echo "- Do not write any explanation before or after the code block."
+    echo "- The code block must contain one command only: python3 <<'PY' ... PY"
+    echo "- The Python script must apply the recap directly when I paste it on the VPS."
+    echo
+    echo "Storage requirements:"
+    echo "- Do not overwrite recap history files."
+    echo "- Write the new recap to this timestamped history file:"
+    echo "$target"
+    echo "- Update this stable latest alias/path after writing the timestamped file:"
+    echo "$alias"
+    echo "- The latest alias may be replaced, but the timestamped history file must remain."
+    echo
+    echo "Python script requirements:"
+    echo "- Use pathlib.Path."
+    echo "- Create parent directories if needed."
+    echo "- Write UTF-8 Markdown."
+    echo "- Prefer latest.symlink_to(p.name), with copy fallback if symlink fails."
+    echo "- Print both the history path and latest alias/path at the end."
+    echo
+    echo "Use this exact script skeleton and only replace the recap Markdown content:"
+    echo "python3 <<'PY'"
+    echo "from pathlib import Path"
+    echo "p = Path('$target').expanduser()"
+    echo "latest = Path('$alias').expanduser()"
+    echo "p.parent.mkdir(parents=True, exist_ok=True)"
+    echo 'content = r"""'
+    echo "# Project Recap"
+    echo
+    echo "...updated recap here..."
+    echo '""".strip() + "\n"'
+    echo "p.write_text(content, encoding='utf-8')"
+    echo "try:"
+    echo "    if latest.exists() or latest.is_symlink():"
+    echo "        latest.unlink()"
+    echo "    latest.symlink_to(p.name)"
+    echo "except OSError:"
+    echo "    latest.write_text(p.read_text(encoding='utf-8'), encoding='utf-8')"
+    echo "print('recap history written:', p)"
+    echo "print('latest recap:', latest)"
+    echo "PY"
+    echo
+    echo "Recap content rules:"
+    echo "- Keep useful project context, architecture decisions, active bugs, commands, and workflow conventions."
+    echo "- Include important commands and current next steps."
+    echo "- Remove noisy logs, obsolete debugging, repetitions, and irrelevant details."
+    echo "- Do not include secrets, tokens, passwords, private IPs, emails, or personal data."
+    echo "- Keep it practical for immediately continuing the next AI coding session."
+    echo
+    echo "Fallback: if the chat UI cannot return a copyable code block, I will run recap --base64 and then recap64."
+    echo
+    _i4_recap_prompt_common_context
+  } > "$tmp"
+
+  _i4_copy_file_to_local_clipboard "$tmp"
+  rm -f "$tmp"
+
+  echo "[insider4] Python recap prompt copied to local clipboard."
+  echo "[insider4] Paste it into the AI. It should return one copyable bash block containing a python3 heredoc."
+  echo "[insider4] If the chat breaks the code block, run: recap --base64"
+  echo "[insider4] New recap history target: $target"
+  echo "[insider4] Latest alias/path: $alias"
+}
+RECAP() { recap "$@"; }
+RC() { recap "$@"; }
+
+recap64() {
+  local tmp decoded_path answer
+  tmp="$(mktemp /tmp/insider4-recap64.XXXXXX.sh)"
+
+  echo "[insider4] Paste the base64 returned by the AI, then press Ctrl-D."
+  echo "[insider4] Decoding..."
+
+  if ! decoded_path="$(python3 - "$tmp" <<'PY64'
+import base64
+import re
+import sys
+from pathlib import Path
+
+out = Path(sys.argv[1])
+raw = sys.stdin.read()
+
+if "BEGIN_RECAP64" in raw and "END_RECAP64" in raw:
+    raw = raw.split("BEGIN_RECAP64", 1)[1].split("END_RECAP64", 1)[0]
+
+raw = raw.replace("```", "")
+candidates = re.findall(r"[A-Za-z0-9+/=]{80,}", raw)
+if not candidates:
+    candidates = ["".join(re.findall(r"[A-Za-z0-9+/=]+", raw))]
+
+last_error = None
+for chunk in candidates:
+    clean = re.sub(r"\s+", "", chunk)
+    if not clean:
+        continue
+    clean += "=" * ((-len(clean)) % 4)
+    try:
+        decoded = base64.b64decode(clean, validate=True)
+        text = decoded.decode("utf-8")
+    except Exception as exc:
+        last_error = exc
+        continue
+
+    looks_like_recap = "Project Recap" in text or ".RECAP." in text
+    looks_like_script = "python3" in text or "cat >" in text or "Path(" in text
+    if looks_like_recap and looks_like_script:
+        out.write_text(text, encoding="utf-8")
+        print(str(out))
+        raise SystemExit(0)
+
+raise SystemExit(f"Could not decode a valid recap payload. Last error: {last_error}")
+PY64
+  )"; then
+    echo "[insider4] Decode failed. Nothing applied." >&2
+    rm -f "$tmp"
+    return 1
+  fi
+
+  if [ -z "$decoded_path" ] || [ ! -s "$decoded_path" ]; then
+    echo "[insider4] Decode produced no script. Nothing applied." >&2
+    rm -f "$tmp"
+    return 1
+  fi
+
+  chmod +x "$decoded_path"
+  echo
+  echo "[insider4] Decoded script saved to:"
+  echo "$decoded_path"
+  echo
+  echo "===== BEGIN DECODED SCRIPT PREVIEW ====="
+  sed -n '1,180p' "$decoded_path"
+  echo "===== END DECODED SCRIPT PREVIEW ====="
+  echo
+  printf "[insider4] Apply this recap update? [y/N] "
+  read -r answer
+  case "$answer" in
+    y|Y|yes|YES)
+      bash "$decoded_path"
+      ;;
+    *)
+      echo "[insider4] Cancelled. Nothing applied."
+      echo "[insider4] Decoded script kept here for inspection:"
+      echo "$decoded_path"
+      return 1
+      ;;
+  esac
+}
+RECAP64() { recap64 "$@"; }
+# INSIDER4_CONTEXT_HELPERS_V3_END
+
 I4STATUS() {
   echo "[insider4] Project: $INSIDER4_PROJECT_DIR"
   echo "[insider4] Frontend service: $INSIDER4_FRONT_SERVICE"
