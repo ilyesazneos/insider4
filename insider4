@@ -1058,7 +1058,6 @@ lines.append("")
 lines.append("Notes for the AI: use this tree to understand the project structure before suggesting patches. Do not assume excluded files are absent; they were intentionally omitted from the context snapshot.")
 
 out.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
-print(out)
 PYTREE
 
   _i4_set_latest_alias "$file" "$alias"
@@ -1403,6 +1402,35 @@ PY64
 }
 RECAP64() { recap64 "$@"; }
 # INSIDER4_CONTEXT_HELPERS_V3_END
+# INSIDER4_ARBO_FIX_START
+# Standalone arbo command and tree-generation safety checks.
+
+arbo() {
+  local tree
+  tree="$(_i4_generate_project_tree)" || return 1
+
+  if [ ! -f "$tree" ] || [ ! -s "$tree" ]; then
+    echo "[insider4] Tree generation failed or produced an empty file: $tree" >&2
+    return 1
+  fi
+
+  if ! grep -q "Project Tree Snapshot" "$tree"; then
+    echo "[insider4] Tree file does not look valid: $tree" >&2
+    return 1
+  fi
+
+  _i4_copy_file_to_local_clipboard "$tree"
+
+  echo "[insider4] Project tree copied to local clipboard:"
+  echo "$tree"
+}
+ARBO() { arbo "$@"; }
+arbre() { arbo "$@"; }
+ARBRE() { arbo "$@"; }
+treecontext() { arbo "$@"; }
+TREECONTEXT() { arbo "$@"; }
+# INSIDER4_ARBO_FIX_END
+
 
 I4STATUS() {
   echo "[insider4] Project: $INSIDER4_PROJECT_DIR"

@@ -291,60 +291,15 @@ This makes `SVSD` a lightweight safety backup for source code, not a full data d
 
 ---
 
-## AI context and recap helpers
+## AI context, project tree, recap and recovery helpers
 
-INSIDER4 includes helpers for long AI-assisted sessions.
-
-### `contexte`
+INSIDER4 includes helpers for long AI-assisted sessions. These helpers are injected into the VPS shell when you start INSIDER4 from your local machine:
 
 ```bash
-contexte
+insider4
 ```
 
-Copies the INSIDER4 workflow context to your local clipboard.
-
-Alias:
-
-```bash
-CTX
-```
-
-Use it at the beginning of a new AI conversation so the assistant understands how the workflow works.
-
-### `recup`
-
-```bash
-recup
-```
-
-Copies the stored project recap to your local clipboard.
-
-Alias:
-
-```bash
-RECUP
-```
-
-Use it to give the AI the app or project context from the previous session.
-
-### `recap`
-
-```bash
-recap
-```
-
-Copies a prompt asking the AI to generate an updated project recap writer.
-
-The AI should return a Python script that writes the recap file on the VPS.
-
-Aliases:
-
-```bash
-RECAP
-RC
-```
-
-Context and recap files are stored outside your project repository:
+Generated context files are stored outside your project repository:
 
 ```text
 ~/.insider4/contexts/
@@ -352,22 +307,133 @@ Context and recap files are stored outside your project repository:
 
 This avoids accidental commits when `git add -A` is used.
 
-Recommended AI session start:
+### `arbo` / `ARBO`
+
+```bash
+arbo
+```
+
+Generates a fresh Markdown project tree snapshot from the configured `INSIDER4_PROJECT_DIR` and copies it to your local clipboard.
+
+This is the standalone arborescence command. Use it when you only want to give the AI the project structure.
+
+The tree is language-agnostic and optimized for AI reading. It excludes heavy, generated, cache, media, archive, and secret-prone paths, including `.git`, `node_modules`, build folders, cache folders, virtual environments, logs, uploads, media folders, archives, database dumps, `.env`-style files, private keys, certificates, and large media/archive formats.
+
+Every `arbo` call creates a new timestamped tree history file and updates the stable latest tree alias.
+
+### `contexte` / `context` / `CTX`
 
 ```bash
 contexte
+```
+
+Copies a fresh context bundle to your local clipboard.
+
+The bundle contains:
+
+- the INSIDER4 workflow instructions;
+- a fresh generated project tree snapshot.
+
+### `recup` / `RECUP`
+
+```bash
 recup
 ```
 
-Paste both into the AI assistant.
+Copies a complete session-start bundle to your local clipboard.
 
-Recommended AI session end:
+The bundle contains:
+
+- the INSIDER4 workflow instructions;
+- a fresh generated project tree snapshot;
+- the latest project recap.
+
+Use `recup` at the beginning of a new AI conversation. You no longer need to paste `contexte` separately unless you specifically want only the workflow and tree context.
+
+### `recap` / `RECAP` / `RC`
 
 ```bash
 recap
 ```
 
-Paste the generated prompt into the AI assistant, then run the returned Python script on the VPS to update the stored recap.
+Copies a prompt asking the AI to generate an updated project recap writer.
+
+Normal mode expects the AI to return exactly one copyable `bash` code block containing a `python3` heredoc. When you paste and run that script on the VPS, it writes a new timestamped recap file and updates the stable latest recap alias.
+
+Recap files are not overwritten. INSIDER4 keeps timestamped history files like:
+
+```text
+~/.insider4/contexts/PROJECT.RECAP.20260611_153012.md
+```
+
+The latest recap is also available through a stable alias:
+
+```text
+~/.insider4/contexts/PROJECT.RECAP.md
+```
+
+The alias may be replaced, but timestamped history files are preserved.
+
+### `recap --base64`
+
+```bash
+recap --base64
+```
+
+Use this fallback if the chat UI breaks copyable code blocks.
+
+This command copies a stricter prompt asking the AI to return only one base64 payload. The base64 payload must decode to a recap writer script.
+
+### `recap64` / `RECAP64`
+
+```bash
+recap64
+```
+
+Use this after `recap --base64`.
+
+Paste the base64 returned by the AI, then press `Ctrl-D`. INSIDER4 decodes the payload, shows a preview of the decoded script, and asks for confirmation before applying it.
+
+If decoding fails, nothing is applied.
+
+### `recaps` / `RECAPS`
+
+```bash
+recaps
+```
+
+Lists local recap history files for the current configured project.
+
+### `trees` / `TREES`
+
+```bash
+trees
+```
+
+Lists local project tree snapshot history files.
+
+### Recommended AI session start
+
+```bash
+recup
+```
+
+Paste the copied bundle into the AI assistant.
+
+### Recommended AI session end
+
+```bash
+recap
+```
+
+Paste the generated prompt into the AI assistant, then run the returned Python script on the VPS.
+
+If the returned code block is not cleanly copyable:
+
+```bash
+recap --base64
+recap64
+```
 
 ---
 
