@@ -58,9 +58,12 @@ pc 'command'
 FT
 BC
 FTBC
+erase
+news
 SVSD
 contexte
 recup
+recap
 ```
 
 This makes it easy to collaborate with an AI assistant while keeping direct control of the server.
@@ -118,6 +121,16 @@ I4LOGS
 I4LOGS frontend
 I4LOGS backend
 ```
+
+`FT`, `BC`, and `FTBC` can also run without a heredoc patch:
+
+```bash
+FT
+BC
+FTBC
+```
+
+In that mode, INSIDER4 only runs the Git pre-save and rebuilds the selected service or services.
 
 ---
 
@@ -245,6 +258,25 @@ If there are staged changes, INSIDER4 creates an automatic commit before the new
 
 This gives you a rollback point before every AI-generated modification.
 
+### Rollback with `erase`
+
+If a patch is not good, run:
+
+```bash
+erase
+```
+
+This resets the current working tree to the latest Git state and removes untracked files created by the patch.
+
+To go back through previous INSIDER4 pre-save checkpoints:
+
+```bash
+erase 2
+erase 3
+```
+
+For safety, `erase [n]` only auto-removes commits whose message starts with `insider4 pre-*`.
+
 ---
 
 ## Backup workflow
@@ -334,6 +366,19 @@ The bundle contains:
 - the INSIDER4 workflow instructions;
 - a fresh generated project tree snapshot.
 
+### `news` / `NEWS`
+
+```bash
+news
+```
+
+Copies only:
+
+- the INSIDER4 workflow instructions;
+- a fresh generated project tree snapshot.
+
+It does not include the latest recap.
+
 ### `recup` / `RECUP`
 
 ```bash
@@ -356,45 +401,17 @@ Use `recup` at the beginning of a new AI conversation. You no longer need to pas
 recap
 ```
 
-Copies a prompt asking the AI to generate an updated project recap writer.
+Copies a simple prompt asking the AI to create a short Markdown recap for the current session.
 
-Normal mode expects the AI to return exactly one copyable `bash` code block containing a `python3` heredoc. When you paste and run that script on the VPS, it writes a new timestamped recap file and updates the stable latest recap alias.
+The AI should return one runnable `bash` block that writes a timestamped `.md` recap file and updates the latest recap alias.
 
-Recap files are not overwritten. INSIDER4 keeps timestamped history files like:
+The recap should stay short and practical:
 
-```text
-~/.insider4/contexts/PROJECT.RECAP.20260611_153012.md
-```
+- what was done in the current session;
+- current state;
+- what to do next.
 
-The latest recap is also available through a stable alias:
-
-```text
-~/.insider4/contexts/PROJECT.RECAP.md
-```
-
-The alias may be replaced, but timestamped history files are preserved.
-
-### `recap --base64`
-
-```bash
-recap --base64
-```
-
-Use this fallback if the chat UI breaks copyable code blocks.
-
-This command copies a stricter prompt asking the AI to return only one base64 payload. The base64 payload must decode to a recap writer script.
-
-### `recap64` / `RECAP64`
-
-```bash
-recap64
-```
-
-Use this after `recap --base64`.
-
-Paste the base64 returned by the AI, then press `Ctrl-D`. INSIDER4 decodes the payload, shows a preview of the decoded script, and asks for confirmation before applying it.
-
-If decoding fails, nothing is applied.
+No base64 workflow is required for normal recap usage.
 
 ### `recaps` / `RECAPS`
 
@@ -428,12 +445,7 @@ recap
 
 Paste the generated prompt into the AI assistant, then run the returned Python script on the VPS.
 
-If the returned code block is not cleanly copyable:
-
-```bash
-recap --base64
-recap64
-```
+The returned script writes a short Markdown recap for the next session.
 
 ---
 
@@ -508,6 +520,9 @@ pc 'command'
 FT
 BC
 FTBC
+erase
+erase 2
+news
 SV
 SD
 SVSD
@@ -740,6 +755,6 @@ MIT
 
 `recap` is the normal end-of-session command. It copies a clear prompt asking the AI to return one copyable `bash` block containing a `python3` heredoc. The Python script writes a new timestamped recap file and updates the stable latest recap alias.
 
-`recap --base64` is the fallback when the chat UI breaks copyable code blocks. It asks the AI to return only base64. Then run `recap64`, paste the base64, press Ctrl-D, review the decoded script preview, and confirm.
+The normal recap workflow is plain `recap`: it asks the AI for one runnable bash block that writes a short Markdown recap.
 
 Generated context, tree, session, workflow, and recap files are stored under `~/.insider4/contexts`. Timestamped history files are preserved; stable `*.md` paths are only latest aliases.

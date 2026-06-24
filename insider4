@@ -1401,6 +1401,241 @@ PY64
   esac
 }
 RECAP64() { recap64 "$@"; }
+# INSIDER4_TARGETED_OVERRIDES_START
+# Targeted overrides: empty rebuilds, erase, news, and simplified recap prompt.
+_i4_python_stdin_optional() {
+  local workdir="$1"
+  local tmp
+  tmp="$(mktemp /tmp/insider4-patch.XXXXXX.py)"
+
+  if [ -t 0 ]; then
+    rm -f "$tmp"
+    return 0
+  fi
+
+  cat > "$tmp"
+  if [ ! -s "$tmp" ]; then
+    echo "[insider4] Empty patch: rebuild only."
+    rm -f "$tmp"
+    return 0
+  fi
+
+  cd "$workdir" || {
+    echo "[insider4] Workdir not found: $workdir" >&2
+    rm -f "$tmp"
+    return 1
+  }
+
+  python3 "$tmp"
+  local code=$?
+  rm -f "$tmp"
+  return "$code"
+}
+
+FT() {
+  local root
+  root="$(_i4_expand_dir "$INSIDER4_PROJECT_DIR")"
+  _i4_git_pre_save "frontend" || return 1
+  _i4_python_stdin_optional "$root/frontend" || return 1
+  _i4_rebuild "$INSIDER4_FRONT_SERVICE"
+}
+
+BC() {
+  local root
+  root="$(_i4_expand_dir "$INSIDER4_PROJECT_DIR")"
+  _i4_git_pre_save "backend" || return 1
+  _i4_python_stdin_optional "$root/backend" || return 1
+  _i4_rebuild "$INSIDER4_BACK_SERVICE"
+}
+
+FTBC() {
+  local root
+  root="$(_i4_expand_dir "$INSIDER4_PROJECT_DIR")"
+  _i4_git_pre_save "full" || return 1
+  _i4_python_stdin_optional "$root" || return 1
+  _i4_rebuild "$INSIDER4_FRONT_SERVICE" "$INSIDER4_BACK_SERVICE"
+}
+
+erase() {
+  local steps msg i
+  steps="${1:-1}"
+
+  case "$steps" in
+    ''|*[!0-9]*)
+      echo "[insider4] Usage: erase [number_of_patches]" >&2
+      return 1
+      ;;
+  esac
+
+  if [ "$steps" -lt 1 ]; then
+    echo "[insider4] Usage: erase [number_of_patches]" >&2
+    return 1
+  fi
+
+  _i4_root || return 1
+  if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "[insider4] Not a Git repository." >&2
+    return 1
+  fi
+
+  echo "[insider4] Erasing current uncommitted patch..."
+  git reset --hard HEAD || return 1
+  git clean -fd || return 1
+
+  i=1
+  while [ "$i" -lt "$steps" ]; do
+    msg="$(git log -1 --pretty=%s 2>/dev/null || true)"
+    case "$msg" in
+      insider4\ pre-*)
+        echo "[insider4] Erasing saved patch checkpoint: $msg"
+        git reset --hard HEAD~1 || return 1
+        git clean -fd || return 1
+        ;;
+      *)
+        echo "[insider4] Stop: HEAD is not an insider4 pre-* checkpoint: $msg" >&2
+        echo "[insider4] Refusing to erase a normal commit automatically." >&2
+        return 1
+        ;;
+    esac
+    i=$((i + 1))
+  done
+
+  echo "[insider4] erase done. Current status:"
+  git status --short
+}
+
+ERASE() { erase "$@"; }
+
+news() {
+  local workflow tree bundle
+  workflow="$(_i4_init_workflow_context)"
+  tree="$(_i4_generate_project_tree)"
+  bundle="$(_i4_write_context_bundle "$workflow" "$tree")"
+  _i4_copy_file_to_local_clipboard "$bundle"
+  echo "[insider4] Workflow + project tree copied to local clipboard:"
+  echo "[insider4] Bundle: $bundle"
+  echo "[insider4] Tree: $tree"
+}
+
+NEWS() { news "$@"; }
+
+recap() {
+  local tmp target alias current key
+  if [ "${1:-}" = "--base64" ] || [ "${1:-}" = "base64" ] || [ "${1:-}" = "64" ]; then
+    echo "[insider4] recap base64 is disabled. Run plain: recap" >&2
+    return 1
+  fi
+
+  target="$(_i4_new_recap_file)"
+  alias="$(_i4_recap_latest_alias)"
+  current="$(_i4_init_project_recap)"
+  key="$(_i4_project_key)"
+  tmp="$(mktemp /tmp/insider4-recap-prompt.XXXXXX.txt)"
+
+  {
+    echo "Tu aides à maintenir un récap court pour une session INSIDER4."
+    echo
+    echo "Objectif : créer un fichier Markdown de récap pour reprendre facilement la prochaine session."
+    echo
+    echo "Réponds UNIQUEMENT avec un bloc de code bash exécutable."
+    echo "Pas d'explication avant ou après. Pas de base64. Pas de markdown hors du bloc bash."
+    echo
+    echo "Le bloc bash doit :"
+    echo "1. Créer ce fichier Markdown :"
+    echo "$target"
+    echo "2. Écrire dedans un récap très court de la session actuelle."
+    echo "3. Mettre à jour ce lien/fichier latest :"
+    echo "$alias"
+    echo "4. Afficher le chemin écrit à la fin."
+    echo
+    echo "Structure souhaitée du fichier Markdown :"
+    echo "# Project Recap"
+    echo "## Session actuelle"
+    echo "- 3 à 8 bullets maximum sur ce qu'on vient de faire."
+    echo "## État actuel"
+    echo "- Ce qui marche / ce qui reste à vérifier."
+    echo "## Prochaine reprise"
+    echo "- 1 à 5 actions concrètes pour continuer."
+    echo
+    echo "Contraintes :"
+    echo "- Très court : environ 20 à 40 lignes maximum."
+    echo "- Garde seulement le contexte utile pour une prochaine session."
+    echo "- Ne mets pas de logs longs, pas de secrets, pas de tokens, pas de données privées."
+    echo "- Le script doit utiliser cat > fichier <<'MD' puis rm/ln -s ou cp pour mettre à jour latest."
+    echo
+    echo "Chemins à utiliser dans le script :"
+    echo "PROJECT_KEY=$key"
+    echo "TARGET_RECAP=$target"
+    echo "LATEST_RECAP=$alias"
+    echo
+    echo "Récap actuel à remplacer/améliorer :"
+    echo "----- BEGIN CURRENT RECAP -----"
+    cat "$current"
+    echo "----- END CURRENT RECAP -----"
+  } > "$tmp"
+
+  _i4_copy_file_to_local_clipboard "$tmp"
+  rm -f "$tmp"
+  echo "[insider4] Simple recap prompt copied to local clipboard."
+  echo "[insider4] Paste it into the AI. It should return one bash block that writes:"
+  echo "[insider4] $target"
+}
+
+RECAP() { recap "$@"; }
+RC() { recap "$@"; }
+# INSIDER4_TARGETED_OVERRIDES_END
+
+# INSIDER4_DOC_OVERRIDES_START
+_i4_workflow_context_content() {
+  cat <<'I4_WORKFLOW_MD'
+# INSIDER4 Workflow Context
+
+INSIDER4 is an AI-assisted remote development workflow for Docker Compose projects.
+
+## Main commands
+
+- `pc 'command'`: run a command on the VPS and copy output to the local clipboard.
+- `FT`: rebuild frontend. With a Python heredoc, patch from `frontend/` first.
+- `BC`: rebuild backend. With a Python heredoc, patch from `backend/` first.
+- `FTBC`: rebuild frontend and backend. With a Python heredoc, patch from project root first.
+- `erase [n]`: rollback the current patch. With `n`, rollback through previous INSIDER4 pre-save checkpoints.
+- `news`: copy workflow instructions and a fresh project tree only.
+- `contexte`: copy workflow instructions and a fresh project tree.
+- `recup`: copy workflow instructions, a fresh project tree, and the latest recap.
+- `recap`: copy a simple prompt asking the AI to create a short Markdown recap.
+- `recaps`: list recap history files.
+- `trees`: list project tree snapshot history files.
+- `SV`, `SD`, `SVSD`: create/send source-code backups.
+- `I4STATUS`, `I4DOCTOR`, `I4LOGS`: inspect status, config, Docker, and logs.
+
+## Empty rebuilds
+
+These commands work with no patch input:
+
+    FT
+    BC
+    FTBC
+
+In empty mode, INSIDER4 runs the Git pre-save and rebuilds the selected service or services.
+
+## Rollback
+
+    erase
+    erase 2
+    erase 3
+
+`erase [n]` only auto-removes commits whose message starts with `insider4 pre-*`.
+
+## Context
+
+`news` copies workflow + arborescence only.
+`recup` copies workflow + arborescence + latest recap.
+`recap` copies a simple prompt for writing a short `.md` recap for the next session.
+
+No base64 workflow is needed for normal recap usage.
+I4_WORKFLOW_MD
+}
+# INSIDER4_DOC_OVERRIDES_END
 # INSIDER4_CONTEXT_HELPERS_V3_END
 # INSIDER4_ARBO_FIX_START
 # Standalone arbo command and tree-generation safety checks.
