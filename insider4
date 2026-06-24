@@ -1457,7 +1457,7 @@ FTBC() {
 }
 
 erase() {
-  local steps msg i
+  local steps remaining msg status
   steps="${1:-1}"
 
   case "$steps" in
@@ -1478,26 +1478,36 @@ erase() {
     return 1
   fi
 
-  echo "[insider4] Erasing current uncommitted patch..."
-  git reset --hard HEAD || return 1
-  git clean -fd || return 1
+  remaining="$steps"
 
-  i=1
-  while [ "$i" -lt "$steps" ]; do
+  # If a patch is still uncommitted, it counts as one Insider4 patch.
+  status="$(git status --porcelain)"
+  if [ -n "$status" ]; then
+    echo "[insider4] Erasing uncommitted Insider4 patch..."
+    git reset --hard HEAD || return 1
+    git clean -fd || return 1
+    remaining=$((remaining - 1))
+  fi
+
+  # Then rollback committed Insider4 checkpoints/patches.
+  while [ "$remaining" -gt 0 ]; do
     msg="$(git log -1 --pretty=%s 2>/dev/null || true)"
+
     case "$msg" in
-      insider4\ pre-*)
-        echo "[insider4] Erasing saved patch checkpoint: $msg"
+      insider4\ pre-*|insider4\ patch*|insider4:\ patch*)
+        echo "[insider4] Erasing committed Insider4 patch/checkpoint: $msg"
         git reset --hard HEAD~1 || return 1
         git clean -fd || return 1
         ;;
       *)
-        echo "[insider4] Stop: HEAD is not an insider4 pre-* checkpoint: $msg" >&2
+        echo "[insider4] Stop: HEAD is not an Insider4 patch/checkpoint commit." >&2
+        echo "[insider4] HEAD message: $msg" >&2
         echo "[insider4] Refusing to erase a normal commit automatically." >&2
         return 1
         ;;
     esac
-    i=$((i + 1))
+
+    remaining=$((remaining - 1))
   done
 
   echo "[insider4] erase done. Current status:"
@@ -1521,11 +1531,6 @@ NEWS() { news "$@"; }
 
 recap() {
   local tmp target alias current key
-  if [ "${1:-}" = "--base64" ] || [ "${1:-}" = "base64" ] || [ "${1:-}" = "64" ]; then
-    echo "[insider4] recap base64 is disabled. Run plain: recap" >&2
-    return 1
-  fi
-
   target="$(_i4_new_recap_file)"
   alias="$(_i4_recap_latest_alias)"
   current="$(_i4_init_project_recap)"
@@ -1535,35 +1540,41 @@ recap() {
   {
     echo "Tu aides à maintenir un récap court pour une session INSIDER4."
     echo
-    echo "Objectif : créer un fichier Markdown de récap pour reprendre facilement la prochaine session."
+    echo "Objectif : écrire un fichier Markdown de récap qui permettra de reprendre facilement la prochaine session."
     echo
-    echo "Réponds UNIQUEMENT avec un bloc de code bash exécutable."
-    echo "Pas d'explication avant ou après. Pas de base64. Pas de markdown hors du bloc bash."
+    echo "Réponds UNIQUEMENT avec un bloc de code contenant une seule commande :"
+    echo "python3 <<'PY'"
+    echo "# code Python ici"
+    echo "PY"
     echo
-    echo "Le bloc bash doit :"
-    echo "1. Créer ce fichier Markdown :"
+    echo "Aucun texte avant ou après le bloc. Le code Python doit être directement exécutable."
+    echo
+    echo "Le code Python doit :"
+    echo "1. Utiliser pathlib.Path."
+    echo "2. Créer le dossier parent si besoin."
+    echo "3. Écrire le récap Markdown dans ce fichier :"
     echo "$target"
-    echo "2. Écrire dedans un récap très court de la session actuelle."
-    echo "3. Mettre à jour ce lien/fichier latest :"
+    echo "4. Mettre à jour le fichier latest en écrivant le même contenu ici :"
     echo "$alias"
-    echo "4. Afficher le chemin écrit à la fin."
+    echo "5. Afficher le chemin du récap écrit à la fin."
     echo
-    echo "Structure souhaitée du fichier Markdown :"
+    echo "Structure du Markdown à écrire :"
     echo "# Project Recap"
     echo "## Session actuelle"
-    echo "- 3 à 8 bullets maximum sur ce qu'on vient de faire."
+    echo "- 3 à 8 bullets maximum sur ce qui vient d'être fait."
     echo "## État actuel"
-    echo "- Ce qui marche / ce qui reste à vérifier."
+    echo "- Ce qui marche."
+    echo "- Ce qui reste à vérifier."
     echo "## Prochaine reprise"
-    echo "- 1 à 5 actions concrètes pour continuer."
+    echo "- 1 à 5 actions concrètes."
     echo
     echo "Contraintes :"
-    echo "- Très court : environ 20 à 40 lignes maximum."
-    echo "- Garde seulement le contexte utile pour une prochaine session."
-    echo "- Ne mets pas de logs longs, pas de secrets, pas de tokens, pas de données privées."
-    echo "- Le script doit utiliser cat > fichier <<'MD' puis rm/ln -s ou cp pour mettre à jour latest."
+    echo "- Récap très court : environ 20 à 40 lignes maximum."
+    echo "- Garde seulement le contexte utile pour reprendre."
+    echo "- Ne mets pas de logs longs, secrets, tokens, clés, mots de passe ou données privées."
+    echo "- La sortie doit être un seul bloc exécutable basé sur python3 heredoc."
     echo
-    echo "Chemins à utiliser dans le script :"
+    echo "Chemins à utiliser dans le code Python :"
     echo "PROJECT_KEY=$key"
     echo "TARGET_RECAP=$target"
     echo "LATEST_RECAP=$alias"
@@ -1576,8 +1587,8 @@ recap() {
 
   _i4_copy_file_to_local_clipboard "$tmp"
   rm -f "$tmp"
-  echo "[insider4] Simple recap prompt copied to local clipboard."
-  echo "[insider4] Paste it into the AI. It should return one bash block that writes:"
+  echo "[insider4] Simple Python recap prompt copied to local clipboard."
+  echo "[insider4] Paste it into the AI. It should return one python3 heredoc that writes:"
   echo "[insider4] $target"
 }
 

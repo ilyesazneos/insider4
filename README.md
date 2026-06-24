@@ -266,16 +266,16 @@ If a patch is not good, run:
 erase
 ```
 
-This resets the current working tree to the latest Git state and removes untracked files created by the patch.
+This annuls the latest Insider4 patch. If the patch is still uncommitted, it resets the working tree. If the patch/checkpoint was committed by Insider4, it moves Git back by one Insider4 patch commit.
 
-To go back through previous INSIDER4 pre-save checkpoints:
+To go back through several Insider4 patches:
 
 ```bash
 erase 2
 erase 3
 ```
 
-For safety, `erase [n]` only auto-removes commits whose message starts with `insider4 pre-*`.
+For safety, `erase [n]` only auto-removes commits that look like Insider4 patch/checkpoint commits, such as `insider4 pre-*`. It refuses to erase normal commits automatically.
 
 ---
 
@@ -403,7 +403,7 @@ recap
 
 Copies a simple prompt asking the AI to create a short Markdown recap for the current session.
 
-The AI should return one runnable `bash` block that writes a timestamped `.md` recap file and updates the latest recap alias.
+The AI should return one strict `python3 <<'PY'` heredoc block that writes a timestamped `.md` recap file and updates the latest recap alias.
 
 The recap should stay short and practical:
 
@@ -411,7 +411,7 @@ The recap should stay short and practical:
 - current state;
 - what to do next.
 
-No base64 workflow is required for normal recap usage.
+The normal recap workflow is a strict Python heredoc that writes the Markdown recap file.
 
 ### `recaps` / `RECAPS`
 
@@ -755,6 +755,6 @@ MIT
 
 `recap` is the normal end-of-session command. It copies a clear prompt asking the AI to return one copyable `bash` block containing a `python3` heredoc. The Python script writes a new timestamped recap file and updates the stable latest recap alias.
 
-The normal recap workflow is plain `recap`: it asks the AI for one runnable bash block that writes a short Markdown recap.
+The normal recap workflow is plain `recap`: it asks the AI for one strict `python3 <<'PY'` heredoc that writes a short Markdown recap.
 
 Generated context, tree, session, workflow, and recap files are stored under `~/.insider4/contexts`. Timestamped history files are preserved; stable `*.md` paths are only latest aliases.
