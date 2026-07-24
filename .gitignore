@@ -26,6 +26,15 @@ id_ed25519.*
 *.7z
 *.rar
 insider4.bak-*
+reports/design-audit.json
+reports/design-audit.md
+reports/design-audit.xlsx
+reports/code-audit.json
+reports/code-audit.md
+reports/code-audit.xlsx
+reports/reuse-audit.json
+reports/reuse-audit.md
+reports/reuse-audit.xlsx
 
 # OS/editor noise
 .DS_Store
