@@ -387,6 +387,25 @@ rm -f "$tmp_bashrc"
 
   cat <<'I4BLOCK'
 
+_i4_audit() {
+  local kind="$1" module root reports
+  root="$(_i4_expand_dir "$INSIDER4_PROJECT_DIR")"
+  [ -d "$root" ] || { echo "[insider4] Project directory not found: $root" >&2; return 1; }
+  module="$HOME/.insider4/runtime/${kind}_audit.py"
+  [ -s "$module" ] || { echo "[insider4] Audit runtime missing: $module" >&2; return 1; }
+  reports="$root/reports"
+  echo "[insider4] Running ${kind} audit on: $root"
+  python3 "$module" "$root" || { echo "[insider4] ${kind} audit failed" >&2; return 1; }
+  echo "[insider4] ${kind^} audit complete"
+  echo "[insider4] Reports written to: $reports"
+}
+design-audit() { _i4_audit design; }
+code-audit() { _i4_audit code; }
+reuse-audit() { _i4_audit reuse; }
+DESIGN-AUDIT() { design-audit "$@"; }
+CODE-AUDIT() { code-audit "$@"; }
+REUSE-AUDIT() { reuse-audit "$@"; }
+
 pc() {
   bash -lc "$*" 2>&1 | tee /tmp/pc.last >(timeout 3 nc 127.0.0.1 "$INSIDER4_PORT" >/dev/null 2>&1 || true)
 }
@@ -1825,6 +1844,35 @@ exec bash -i
 REMOTE_SCRIPT
 }
 
+audit_runtime_files() {
+  printf '%s\n' audit_common.py design_audit.py code_audit.py reuse_audit.py
+}
+
+install_remote_runtime() {
+  local archive
+  if [ "${INSIDER4_DRY_RUN:-0}" = 1 ]; then
+    echo "[$APP] DRY-RUN: tar-stream audit runtime over SSH"
+    echo "[$APP] DRY-RUN: atomic install into $HOME/.insider4/runtime"
+    return 0
+  fi
+  archive="$(mktemp /tmp/insider4-audit-runtime.XXXXXX.tar)"
+  trap 'rm -f "$archive"' RETURN
+  tar -cf "$archive" $(audit_runtime_files)
+  local remote_install
+  remote_install=$(cat <<'REMOTE_INSTALL'
+set -euo pipefail
+parent="$HOME/.insider4"; runtime="$parent/runtime"; mkdir -p "$parent"
+stage="$(mktemp -d "$parent/runtime.tmp.XXXXXX")"; trap 'rm -rf "$stage"' EXIT INT TERM
+tar -xf - -C "$stage"
+for f in audit_common.py design_audit.py code_audit.py reuse_audit.py; do [ -s "$stage/$f" ] || exit 1; python3 -m py_compile "$stage/$f" || exit 1; done
+chmod 700 "$stage"; chmod 600 "$stage"/*.py; mv -T "$stage" "$runtime"
+trap - EXIT; rm -rf "$stage"; echo "[insider4] Audit runtime installed."
+REMOTE_INSTALL
+)
+  ssh "$SSH_TARGET" "bash -c $(printf '%q' "$remote_install")" < "$archive"
+  rm -f "$archive"
+}
+
 connect() {
   load_config
 
@@ -1833,6 +1881,8 @@ connect() {
   need python3
 
   write_config "$SSH_TARGET" "$PORT" "$BACKUP_PORT" "$PROJECT_DIR" "$FRONT_SERVICE" "$BACK_SERVICE" "$LOCAL_BACKUP_DIR"
+
+  install_remote_runtime
 
   local copy_cmd
   copy_cmd="$(clipboard_command)"
@@ -2087,6 +2137,7 @@ Remote helpers:
   I4LOGS                           Show Docker logs on demand
   I4STATUS                         Show Git, Docker and backup status
   I4DOCTOR                         Check remote dependencies and project
+  design-audit / code-audit / reuse-audit  Generate reports for the configured project
   I4HELP                           Show remote helper help
   contexte                        Copy INSIDER4 workflow context
   recap                            Copy AI recap prompt

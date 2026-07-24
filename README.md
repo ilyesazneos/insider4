@@ -29,61 +29,41 @@ project/
 
 ---
 
-## Audit commands
+## Remote audit workflow (recommended)
 
-The three audit commands run locally against the current directory by default, accept an explicit project path, and write independent reports under `reports/`. They do not require INSIDER4 SSH configuration or an active remote session.
-
-| Command | Purpose | Workbook worksheets |
-|---|---|---|
-| `design-audit` | Interface elements, messages, prompts, spacing, and design consistency | `Inventory`, `Inconsistencies`, `Design Tokens`, `Recommendations` |
-| `code-audit` | Quality, maintainability, security, testing, complexity, and performance risks | `Summary`, `Findings`, `Duplicates`, `Complexity`, `Performance Risks`, `Recommendations` |
-| `reuse-audit` | Duplication, shared responsibilities, behavior differences, and extraction risks | `Summary`, `Duplicate Groups`, `Shared Candidates`, `Behavior Differences`, `Workflow Risks`, `Recommendations` |
-
-### Design audit
-
-Audit the current project or pass a project path explicitly:
+Start INSIDER4 locally:
 
 ```bash
-cd /path/to/project
-insider4 design-audit
-insider4 design-audit /path/to/another-project
+insider4
 ```
 
-The command inventories colors and ANSI styles, symbols and icons, headings and separators, spacing patterns, status and confirmation messages, and interactive prompts. It writes:
+After the normal SSH shell opens, run the audits directly without providing the project path again:
+
+```bash
+design-audit
+code-audit
+reuse-audit
+```
+
+Each command uses `$INSIDER4_PROJECT_DIR` and writes JSON, Markdown, and XLSX reports to:
 
 ```text
-reports/design-audit.json
-reports/design-audit.md
-reports/design-audit.xlsx
+$INSIDER4_PROJECT_DIR/reports/
 ```
 
-The workbook contains `Inventory`, `Inconsistencies`, `Design Tokens`, and `Recommendations`. The scanner ignores source-control data, virtual environments, dependencies, caches, generated output, binary and oversized files, archives, media, databases, and secret-prone files such as `.env`, credentials, certificates, and private keys. It does not upload or transmit reports.
+The audit runtime is transferred automatically to the private VPS directory `~/.insider4/runtime` when INSIDER4 connects. The commands preserve the normal remote shell and return a non-zero status on failure without closing SSH.
 
-### Code audit
+### Backward-compatible local alternatives
 
-Inspect the current project, or pass a path explicitly:
+The local forms remain available when you explicitly want to audit a local directory. They default to the current directory and do not use the remote SSH session:
 
 ```bash
-insider4 code-audit
-insider4 code-audit /path/to/project
+insider4 design-audit [PROJECT_PATH]
+insider4 code-audit [PROJECT_PATH]
+insider4 reuse-audit [PROJECT_PATH]
 ```
 
-The command reports potential quality, maintainability, security, testing, complexity, duplication, and performance risks in `reports/code-audit.json`, `.md`, and `.xlsx`. The workbook contains `Summary`, `Findings`, `Duplicates`, `Complexity`, `Performance Risks`, and `Recommendations`. Findings distinguish confirmed structural issues from heuristic warnings and risks requiring runtime profiling or benchmarks. Static analysis does not prove a performance problem.
-
-All audit commands ignore report output, source-control data, dependencies, virtual environments, generated and binary files, and secret-prone paths. They use only the Python standard library and never upload results. Generated findings are advisory: review them against the project’s actual contracts and runtime behavior before making changes.
-
-### Reuse audit
-
-Identify conservative reuse and extraction opportunities without changing source code:
-
-```bash
-insider4 reuse-audit
-insider4 reuse-audit /path/to/project
-```
-
-It compares code blocks, functions, components, constants, handlers, reporting logic, and workflow operations. Each candidate records similarity, behavioral differences, dependencies, side effects, workflow impact, breakage risk, prerequisite tests, and an `extract`, `review`, or `keep separate` recommendation.
-
-Reports are written to `reports/reuse-audit.json`, `.md`, and `.xlsx`. The workbook contains `Summary`, `Duplicate Groups`, `Shared Candidates`, `Behavior Differences`, `Workflow Risks`, and `Recommendations`. Similarity is evidence for review, not proof that an abstraction is desirable.
+They generate the same report filenames under the selected project’s `reports/` directory.
 
 ---
 
