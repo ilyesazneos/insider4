@@ -2018,6 +2018,30 @@ status() {
   fi
 }
 
+reuse_audit() {
+  need python3
+  local script_dir
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  python3 "$script_dir/reuse_audit.py" "${1:-$PWD}"
+}
+
+
+code_audit() {
+  need python3
+  local script_dir
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  python3 "$script_dir/code_audit.py" "${1:-$PWD}"
+}
+
+
+design_audit() {
+  need python3
+  local script_dir
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  python3 "$script_dir/design_audit.py" "${1:-$PWD}"
+}
+
+
 reset_config() {
   rm -f "$CONFIG_FILE" "$PAPIER2_CONFIG_FILE"
   echo "[$APP] Config deleted."
@@ -2034,6 +2058,9 @@ It also writes a compatible papier2 config.
 
 Local commands:
   insider4                         Connect with one SSH session
+  insider4 design-audit [PATH]     Audit interface design and write reports
+  insider4 code-audit [PATH]       Audit code quality and write reports
+  insider4 reuse-audit [PATH]      Audit reuse opportunities and workflow risks
   insider4 config                  Configure everything
   insider4 key                     Install SSH key on the configured target
   insider4 status                  Show configs
@@ -2069,6 +2096,9 @@ HELP
 
 case "${1:-connect}" in
   connect) connect ;;
+  design-audit) design_audit "${2:-}" ;;
+  code-audit) code_audit "${2:-}" ;;
+  reuse-audit) reuse_audit "${2:-}" ;;
   config) configure ;;
   key|ssh-key) setup_key ;;
   pull-backup|pull) pull_backup ;;
