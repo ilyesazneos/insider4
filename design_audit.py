@@ -2,6 +2,7 @@
 import collections,datetime,fnmatch,json,os,re,sys,zipfile
 from pathlib import Path
 from xml.sax.saxutils import escape
+from audit_common import md as md_escape
 D={'.git','.venv','venv','env','node_modules','vendor','dist','build','target','.next','.nuxt','.cache','cache','__pycache__','.pytest_cache','coverage','generated','tmp','logs','backups','uploads','media','reports','.idea','.vscode'}
 G={'.env','.env.*','*.pem','*.key','*.crt','*credentials*','*secret*','*.lock','*.min.js','*.min.css','*.map','*.pyc','*.log','*.db','*.sqlite*','*.zip','*.tar*','*.png','*.jpg','*.gif','*.pdf','*.mp*','design-audit.*'}
 C=[('hex',re.compile(r'(?<![\w#])#(?:[\da-fA-F]{3,4}|[\da-fA-F]{6}|[\da-fA-F]{8})(?![\da-fA-F])')),('rgb',re.compile(r'\brgba?\([^)]{3,80}\)',re.I)),('hsl',re.compile(r'\bhsla?\([^)]{3,80}\)',re.I)),('ansi',re.compile(r'(?:\\033|\\e|\\x1b)\[[\d;]*m'))]
@@ -60,8 +61,8 @@ def audit(root):
  recs=[{'priority':'high','area':'Messages','recommendation':'Standardize status and confirmation templates.','reason':'Consistent tone and next steps improve comprehension.'},{'priority':'medium','area':'Design system','recommendation':'Document semantic colors, symbols, separators, and spacing.','reason':'Shared tokens reduce interface drift.'}]
  now=datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat();doc={'schema_version':1,'generated_at':now,'project':root.name,'scan':{'root':str(root),**stats},'summary':{'inventory_items':len(inv),'inconsistencies':len(issues),'design_tokens':len(tokens),'recommendations':len(recs)},'inventory':inv,'inconsistencies':issues,'design_tokens':tokens,'recommendations':recs}
  (out/'design-audit.json').write_text(json.dumps(doc,indent=2,ensure_ascii=False)+'\n')
- md=['# Design Audit','',f'Generated: {now}','','## Inventory','','| Category | Type | Value | Source |','|---|---|---|---|']+[f'| {r["category"]} | {r["subtype"]} | {r["value"].replace("|","\\|")} | {r["file"]}:{r["line"]} |' for r in inv]
- for title,rows,keys in [('Inconsistencies',issues,('area','severity','issue','evidence')),('Design Tokens',tokens,('token','category','value','rationale')),('Recommendations',recs,('priority','area','recommendation','reason'))]:md+=['',f'## {title}','','| '+' | '.join(keys)+' |','|---|---|---|---|']+['| '+' | '.join(str(r[k]).replace('|','\\|') for k in keys)+' |' for r in rows]
+ md=['# Design Audit','',f'Generated: {now}','','## Inventory','','| Category | Type | Value | Source |','|---|---|---|---|']+[f'| {r["category"]} | {r["subtype"]} | {md_escape(r["value"])} | {r["file"]}:{r["line"]} |' for r in inv]
+ for title,rows,keys in [('Inconsistencies',issues,('area','severity','issue','evidence')),('Design Tokens',tokens,('token','category','value','rationale')),('Recommendations',recs,('priority','area','recommendation','reason'))]:md+=['',f'## {title}','','| '+' | '.join(keys)+' |','|---|---|---|---|']+['| '+' | '.join(md_escape(r[k]) for k in keys)+' |' for r in rows]
  (out/'design-audit.md').write_text('\n'.join(md)+'\n');xlsx(out/'design-audit.xlsx',inv,issues,tokens,recs);return doc
 def xlsx(path,inv,issues,tokens,recs):
  sheets=[('Inventory',('category','subtype','value','file','line','context'),inv),('Inconsistencies',('area','severity','issue','evidence'),issues),('Design Tokens',('token','category','value','rationale'),tokens),('Recommendations',('priority','area','recommendation','reason'),recs)]
