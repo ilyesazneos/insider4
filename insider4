@@ -1849,7 +1849,8 @@ audit_runtime_files() {
 }
 
 install_remote_runtime() {
-  local archive
+  local archive script_dir
+  script_dir="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
   if [ "${INSIDER4_DRY_RUN:-0}" = 1 ]; then
     echo "[$APP] DRY-RUN: tar-stream audit runtime over SSH"
     echo "[$APP] DRY-RUN: atomic install into $HOME/.insider4/runtime"
@@ -1857,7 +1858,7 @@ install_remote_runtime() {
   fi
   archive="$(mktemp /tmp/insider4-audit-runtime.XXXXXX.tar)"
   trap 'rm -f "$archive"' RETURN
-  tar -cf "$archive" $(audit_runtime_files)
+  tar -cf "$archive" -C "$script_dir" $(audit_runtime_files)
   local remote_install
   remote_install=$(cat <<'REMOTE_INSTALL'
 set -euo pipefail
